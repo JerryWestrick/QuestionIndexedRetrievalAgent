@@ -1,0 +1,411 @@
+#!/usr/bin/env python3
+"""QIRA — Question Indexed Retrieval Agent runtime.
+
+KePrompt external function providing qira_search and qira_read tools.
+
+Runtime modes (called by KePrompt during conversations):
+  --list-functions    Output function definitions in OpenAI format
+  qira_search         JSON on stdin → search results as markdown
+  qira_read           JSON on stdin → section content as markdown
+
+Release mode (called by engineer when corpora change):
+  --initialize        Scan corpora, generate qira.prompt
+"""
+
+import json
+import os
+import sqlite3
+import sys
+from pathlib import Path
+from string import Template
+
+import chromadb
+
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+# During KePrompt function execution, cwd = project root.
+# During --list-functions discovery, cwd = prompts/functions/.
+# We detect which context we're in and set CORPUS_DIR accordingly.
+
+def find_corpus_dir():
+    """Locate the qira-corpus directory relative to this script."""
+    script_dir = Path(__file__).resolve().parent
+    # When installed in prompts/functions/, corpus is a sibling directory
+    candidate = script_dir / "qira-corpus"
+    if candidate.is_dir():
+        return candidate
+    # Fallback: check relative to cwd (development/testing)
+    candidate = Path.cwd() / "qira-corpus"
+    if candidate.is_dir():
+        return candidate
+    # Fallback: check test-corpus in project root (development)
+    candidate = Path.cwd() / "test-corpus"
+    if candidate.is_dir():
+        return candidate
+    # Fallback: check test-corpus relative to script
+    candidate = script_dir.parent / "test-corpus"
+    if candidate.is_dir():
+        return candidate
+    return None
+
+
+CORPUS_DIR = find_corpus_dir()
+
+
+# ---------------------------------------------------------------------------
+# Function definitions (OpenAI function calling format)
+# ---------------------------------------------------------------------------
+
+FUNCTION_DEFINITIONS = [
+    {
+        "name": "qira_search",
+        "description": (
+            "Search a knowledge corpus for sections relevant to a question. "
+            "Returns matching sections with distance scores, breadcrumbs, "
+            "questions each section answers, and excerpts. "
+            "Use qira_read to fetch full section content."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "corpus": {
+                    "type": "string",
+                    "description": "Corpus to search (e.g. 'python-stdlib')"
+                },
+                "question": {
+                    "type": "string",
+                    "description": "A precise, well-formed question about what you need to know"
+                },
+                "n_results": {
+                    "type": "integer",
+                    "description": "Maximum number of results to return (default 5)"
+                }
+            },
+            "required": ["corpus", "question"],
+            "additionalProperties": False
+        }
+    },
+    {
+        "name": "qira_read",
+        "description": (
+            "Read the full content of a section by its ID. "
+            "Section IDs appear in qira_search results. "
+            "Returns the section with full content, breadcrumb, and subsection links."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "section_id": {
+                    "type": "string",
+                    "description": "Section ID (e.g. 'python-stdlib:3.2.4')"
+                }
+            },
+            "required": ["section_id"],
+            "additionalProperties": False
+        }
+    }
+]
+
+FUNCTION_MAP = {}  # populated below
+
+
+# ---------------------------------------------------------------------------
+# Corpus access helpers
+# ---------------------------------------------------------------------------
+
+def list_corpora():
+    """Return list of corpus directory names."""
+    if CORPUS_DIR is None:
+        return []
+    return [
+        d.name for d in sorted(CORPUS_DIR.iterdir())
+        if d.is_dir() and (d / f"{d.name}.db").exists()
+    ]
+
+
+def open_db(corpus):
+    """Open SQLite database for a corpus. Raises on failure."""
+    db_path = CORPUS_DIR / corpus / f"{corpus}.db"
+    if not db_path.exists():
+        available = ", ".join(list_corpora())
+        raise FileNotFoundError(
+            f"unknown corpus '{corpus}'. Available: {available}"
+        )
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def open_chroma(corpus):
+    """Open ChromaDB collection for a corpus."""
+    chroma_path = CORPUS_DIR / corpus / "chroma"
+    if not chroma_path.exists():
+        raise FileNotFoundError(
+            f"ChromaDB not found for corpus '{corpus}'"
+        )
+    client = chromadb.PersistentClient(path=str(chroma_path))
+    return client.get_collection("questions")
+
+
+# ---------------------------------------------------------------------------
+# qira_search
+# ---------------------------------------------------------------------------
+
+def qira_search(corpus, question, n_results=5):
+    """Search a corpus for sections matching a question."""
+    collection = open_chroma(corpus)
+    db = open_db(corpus)
+
+    try:
+        # Query ChromaDB — it embeds the question internally
+        results = collection.query(
+            query_texts=[question],
+            n_results=n_results,
+            include=["metadatas", "distances"]
+        )
+
+        section_ids = results["metadatas"][0]
+        distances = results["distances"][0]
+
+        if not section_ids:
+            return "## Nothing Found\n"
+
+        # Deduplicate: group by section_id, keep best (lowest) distance
+        best = {}
+        for meta, dist in zip(section_ids, distances):
+            sid = meta["section_id"]
+            if sid not in best or dist < best[sid]:
+                best[sid] = dist
+
+        # Fetch from SQLite and assemble, ordered by distance
+        output_parts = []
+        for sid, dist in sorted(best.items(), key=lambda x: x[1]):
+            row = db.execute(
+                "SELECT title, search_entry FROM sections WHERE id = ?",
+                (sid,)
+            ).fetchone()
+            if row is None:
+                continue
+            heading = f"## -{dist:.2f}- {sid} {row['title']}"
+            output_parts.append(f"{heading}\n{row['search_entry']}")
+
+        return "\n\n".join(output_parts) + "\n" if output_parts else "## Nothing Found\n"
+    finally:
+        db.close()
+
+
+FUNCTION_MAP["qira_search"] = qira_search
+
+
+# ---------------------------------------------------------------------------
+# qira_read
+# ---------------------------------------------------------------------------
+
+def qira_read(section_id):
+    """Read a section by its full corpus-prefixed ID."""
+    if ":" not in section_id:
+        raise ValueError(
+            f"invalid section_id '{section_id}' — expected format: corpus:hierarchy"
+        )
+
+    corpus, hierarchy = section_id.split(":", 1)
+    db = open_db(corpus)
+
+    try:
+        row = db.execute(
+            "SELECT read_entry FROM sections WHERE id = ?",
+            (section_id,)
+        ).fetchone()
+
+        if row is None:
+            raise ValueError(f"section '{section_id}' not found")
+
+        return row["read_entry"]
+    finally:
+        db.close()
+
+
+FUNCTION_MAP["qira_read"] = qira_read
+
+
+# ---------------------------------------------------------------------------
+# --initialize (release tool)
+# ---------------------------------------------------------------------------
+
+PROMPT_TEMPLATE = Template("""\
+## QIRA Knowledge Retrieval
+
+You have access to external knowledge through QIRA. Available corpora:
+
+| Corpus | Description |
+|--------|-------------|
+$corpus_table
+
+### Important
+
+- **When a question is about topics covered by the corpora, answer from what you find there.** If you search and it's not covered, say so. If the question has nothing to do with the corpora, just answer normally.
+- **Search and read until you have enough to fully answer.** Do not guess from partial results.
+- **Reference section IDs in your answer** so the user can verify.
+
+### Usage
+
+When a question requires knowledge from a corpus:
+
+1. **Search** — formulate a precise question requesting information you need, pick the corpus
+   `qira_search(corpus="hr-regulations", question="How many vacation days per year?")`
+
+2. **Browse** — scan the results, read matched questions and excerpts to judge relevance
+
+3. **Read** — fetch full sections that look relevant
+   `qira_read(section_id="hr-regulations:3.1.1")`
+
+4. **Navigate** — follow cross-references, go to parent/sibling/child sections as needed
+
+5. **Answer** — synthesize from what you read
+
+### Worked Example
+
+$worked_example
+
+### Response Formats
+
+**`qira_search` returns** per hit:
+- `## -{distance}- {id} {title}` — match distance (lower = better), section ID (use with `qira_read`), title
+- `> breadcrumb` — location in document tree
+- `- *question*` — what this section answers
+- excerpt text — preview of content
+- If nothing matches: `## Nothing Found`
+
+**`qira_read` returns:**
+- `# {id} {title}` — section heading
+- `> breadcrumb` — location in document tree
+- full section content
+- `## Subsections` — child sections you can navigate to
+
+**Navigation from any ID** (e.g. `hr-regulations:3.2.4`):
+- Parent: `hr-regulations:3.2`
+- Sibling: `hr-regulations:3.2.5`
+- Child: listed under `## Subsections`
+""")
+
+
+def parse_corpus_md(path):
+    """Parse a corpus.md file into its sections."""
+    text = path.read_text()
+    sections = {}
+    current_key = None
+    current_lines = []
+
+    for line in text.splitlines():
+        if line.startswith("## "):
+            if current_key is not None:
+                sections[current_key] = "\n".join(current_lines).strip()
+            current_key = line[3:].strip()
+            current_lines = []
+        else:
+            current_lines.append(line)
+
+    if current_key is not None:
+        sections[current_key] = "\n".join(current_lines).strip()
+
+    return sections
+
+
+def initialize():
+    """Scan corpora and generate qira.prompt."""
+    if CORPUS_DIR is None:
+        print("Error: no corpus directory found", file=sys.stderr)
+        sys.exit(1)
+
+    corpora = list_corpora()
+    if not corpora:
+        print("Error: no corpora found", file=sys.stderr)
+        sys.exit(1)
+
+    table_rows = []
+    worked_example = None
+
+    for corpus_name in corpora:
+        corpus_md = CORPUS_DIR / corpus_name / "corpus.md"
+        if not corpus_md.exists():
+            print(f"Warning: {corpus_name}/corpus.md not found, skipping",
+                  file=sys.stderr)
+            continue
+
+        sections = parse_corpus_md(corpus_md)
+        name = sections.get("Name", corpus_name)
+        description = sections.get("Description", "")
+        table_rows.append(f"| {corpus_name} | {name} — {description} |")
+
+        if worked_example is None and "Example" in sections:
+            worked_example = sections["Example"]
+
+    if not table_rows:
+        print("Error: no valid corpora found", file=sys.stderr)
+        sys.exit(1)
+
+    corpus_table = "\n".join(table_rows)
+    worked_example = worked_example or "(No worked example available)"
+
+    prompt = PROMPT_TEMPLATE.substitute(
+        corpus_table=corpus_table,
+        worked_example=worked_example
+    )
+
+    # Write qira.prompt next to this script
+    script_dir = Path(__file__).resolve().parent
+    output_path = script_dir / "qira.prompt"
+    output_path.write_text(prompt)
+    print(f"Generated {output_path}")
+
+
+# ---------------------------------------------------------------------------
+# Main dispatch
+# ---------------------------------------------------------------------------
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: qira [--list-functions|--initialize|--version|function_name]",
+              file=sys.stderr)
+        sys.exit(1)
+
+    command = sys.argv[1]
+
+    if command == "--list-functions":
+        print(json.dumps(FUNCTION_DEFINITIONS))
+        return
+
+    if command == "--version":
+        print("qira 0.1.0")
+        return
+
+    if command == "--initialize":
+        initialize()
+        return
+
+    # Function execution: read JSON from stdin
+    if command not in FUNCTION_MAP:
+        print(f"Error: unknown function '{command}'", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        json_input = sys.stdin.read().strip()
+        arguments = json.loads(json_input) if json_input else {}
+        result = FUNCTION_MAP[command](**arguments)
+        print(result)
+    except json.JSONDecodeError as e:
+        print(f"Error: invalid JSON input: {e}", file=sys.stderr)
+        sys.exit(1)
+    except (FileNotFoundError, ValueError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
