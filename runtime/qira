@@ -14,12 +14,50 @@ Release mode (called by engineer when corpora change):
 
 import json
 import os
+import platform
 import sqlite3
+import subprocess
 import sys
 from pathlib import Path
 from string import Template
 
+
+def _is_numa() -> bool:
+    """True if this host has >1 NUMA node (i.e. multi-socket)."""
+    system = platform.system()
+    if system == "Linux":
+        try:
+            return sum(
+                1 for d in os.listdir("/sys/devices/system/node/")
+                if d.startswith("node") and d[4:].isdigit()
+            ) > 1
+        except OSError:
+            return False
+    if system == "Darwin":
+        try:
+            return int(subprocess.check_output(["sysctl", "-n", "hw.packages"])) > 1
+        except Exception:
+            return False
+    return False
+
+
+# Must run before `import chromadb` — onnxruntime's threadpool reads
+# ORT_DISABLE_CPU_AFFINITY at init. On multi-socket Haswell-EP and similar,
+# its default cross-socket affinity calls can hard-reset the host.
+if "--SET-ORT_DISABLE_CPU_AFFINITY" in sys.argv:
+    os.environ["ORT_DISABLE_CPU_AFFINITY"] = "1"
+    sys.argv.remove("--SET-ORT_DISABLE_CPU_AFFINITY")
+
+if _is_numa() and not os.environ.get("ORT_DISABLE_CPU_AFFINITY"):
+    sys.exit(
+        "qira: multi-socket/NUMA host detected — onnxruntime may hard-reset the machine.\n"
+        "Pick one:\n"
+        "  - re-run with --SET-ORT_DISABLE_CPU_AFFINITY (qira sets the env var itself)\n"
+        "  - export ORT_DISABLE_CPU_AFFINITY=1 before invoking qira"
+    )
+
 import chromadb
+from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +177,19 @@ def open_db(corpus):
     return conn
 
 
+def _get_embedding_function(corpus):
+    """Read corpus.md to determine which embedding function to use."""
+    corpus_md = CORPUS_DIR / corpus / "corpus.md"
+    if corpus_md.exists():
+        sections = parse_corpus_md(corpus_md)
+        embedding = sections.get("Embedding", "")
+        if "sentence-transformers" in embedding.lower():
+            model = "all-MiniLM-L6-v2"  # default; could parse from string
+            return SentenceTransformerEmbeddingFunction(model_name=model)
+    # Fall back to chromadb default (onnxruntime) for older corpora
+    return None
+
+
 def open_chroma(corpus):
     """Open ChromaDB collection for a corpus."""
     chroma_path = CORPUS_DIR / corpus / "chroma"
@@ -147,6 +198,9 @@ def open_chroma(corpus):
             f"ChromaDB not found for corpus '{corpus}'"
         )
     client = chromadb.PersistentClient(path=str(chroma_path))
+    ef = _get_embedding_function(corpus)
+    if ef:
+        return client.get_collection("questions", embedding_function=ef)
     return client.get_collection("questions")
 
 
@@ -368,8 +422,11 @@ def initialize():
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: qira [--list-functions|--initialize|--version|function_name]",
-              file=sys.stderr)
+        print(
+            "Usage: qira [--list-functions|--initialize|--version|function_name]\n"
+            "  --SET-ORT_DISABLE_CPU_AFFINITY  prepended flag: set the env var before chromadb loads",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     command = sys.argv[1]
