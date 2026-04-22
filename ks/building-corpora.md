@@ -12,8 +12,8 @@
 | 4 | Rewrite cross-references to full corpus-prefixed IDs | **Semi-shared** — detection patterns are format-specific, write-back logic is shared |
 | 5 | Generate questions per readable unit (LLM call, one per section) | Shared (KePrompt invocation pattern) |
 | 6 | Pre-format `search_entry` + `read_entry` markdown per section | Shared |
-| 7 | Vectorize questions into ChromaDB | Shared |
-| 8 | Write sections to SQLite + write `corpus.md` | Shared |
+| 7 | Vectorize questions with Model2Vec and append to FAISS `IndexFlatL2` | Shared |
+| 8 | Write sections + questions to SQLite, write `{corpus}.faiss`, write `corpus.md` | Shared |
 
 **Adapter boundary:** steps 1-2. After step 2 the pipeline is identical regardless of source format. Copy-paste the shared-infrastructure functions between builders.
 
@@ -28,7 +28,7 @@
 | Xref rewriting | `:func:` / `:class:` / `:mod:` role lookups → IDs |
 | Builder | `examples/python-stdlib/build_corpus.py` (880 lines) |
 | Question prompt | `examples/python-stdlib/generate_questions.prompt` |
-| Embedding function | ChromaDB default (onnxruntime `all-MiniLM-L6-v2`) |
+| Embedding model | Model2Vec `minishlab/potion-base-8M` (static, CPU-only) |
 | LLM for Q-gen | `cerebras/gpt-oss-120b` via KePrompt |
 | Production numbers | 10 modules, 598 sections, 5346 questions, <$0.29, <30 min single-threaded |
 | Output | Shipped as `corpus/python-stdlib.zip` (11 MB) |
@@ -49,10 +49,10 @@ cd cpython-docs && git sparse-checkout set Doc/library
 | Xref rewriting | Regex over plain-text `Article N(M)` / `Annex III` / `Chapter IV` / `Recital (N)` → `{orig} (see eu-ai-act:{id})`. Formex doesn't mark up intra-doc xrefs. |
 | Builder | `examples/eu-ai-act/build_corpus.py` (1340 lines) |
 | Question prompt | `examples/eu-ai-act/generate_questions.prompt` |
-| Embedding function | `SentenceTransformerEmbeddingFunction("all-MiniLM-L6-v2")` — **differs from python-stdlib**, hence the runtime patch |
+| Embedding model | Model2Vec `minishlab/potion-base-8M` — same as python-stdlib (single backend across all corpora) |
 | LLM for Q-gen | `cerebras/gpt-oss-120b` via KePrompt |
 | Estimated cost | ~400 sections × ~$0.0007 ≈ $0.30 |
-| Status | Build in progress, blocked by host crashes — see `ks/gotchas.md` |
+| Status | Shipped — corpus zip at `corpus/eu-ai-act.zip` |
 | README | `examples/eu-ai-act/README.md` |
 
 Source acquisition:
@@ -78,8 +78,9 @@ All line numbers refer to `examples/eu-ai-act/build_corpus.py`.
 | `rewrite_xrefs` / `_rewrite_text` | 810 / 823 | Step 4c — regex substitution with "already annotated" guard. |
 | `call_keprompt` | 853 | Step 5 — one subprocess call per section. 180s timeout. Falls back to stub on failure. |
 | `build_section_entries` | 912 | Step 6 — pre-format `search_entry` + `read_entry`. |
-| `setup_output` | 949 | Step 7/8 — open SQLite (`CREATE TABLE sections`) + create Chroma collection with `SentenceTransformerEmbeddingFunction`. |
-| `rebuild_chroma_from_db` | 991 | **Resume path** — extracts questions from stored `search_entry`s (regex `^- \*(.+)\*$`), rebuilds ChromaDB from scratch. ChromaDB has no WAL and must be wiped on resume. |
+| `setup_output` | 962 | Step 7/8 — create output dir, open SQLite (`CREATE TABLE sections` + `CREATE TABLE questions`), return `(conn, db_path, faiss_path)`. Wipes DB + `.faiss` if `fresh=True`. |
+| `_backfill_questions_from_search_entry` | 1003 | Legacy-corpus migration — if `questions` is empty but `sections` is populated, extracts questions from each `sections.search_entry` via regex `^- \*(.+)\*$` and populates `questions`. |
+| `rebuild_faiss_from_db` | 1032 | **Resume path** — loads Model2Vec, creates in-memory `IndexFlatL2`, re-encodes every `questions.question` in `idx` order, returns `(index, count)`. SQLite is the source of truth; FAISS is always rebuilt in memory and written to disk only at end of successful build. |
 | `write_corpus_md` | 1021 | Write `corpus.md` with Name/Description/Embedding/Example. |
 | `process_section` | 1052 | Worker: keprompt → format → persist under `write_lock`. |
 | `main` | 1140 | Arg parsing, orchestration. |
@@ -96,7 +97,7 @@ build_corpus.py --source DIR --output DIR
                 [-y | --yes]          # skip cost confirmation prompt
 ```
 
-Resume semantics: default is resume. SQLite rows are preserved; ChromaDB is **always** wiped and rebuilt from SQLite on each run (ChromaDB has no WAL and can corrupt on unclean shutdown).
+Resume semantics: default is resume. SQLite rows are preserved; the in-memory FAISS index is **always** rebuilt from the SQLite `questions` table on each run via `rebuild_faiss_from_db`, and the `.faiss` file is written only at end of a successful run. SQLite is the source of truth.
 
 ## Running a build
 
@@ -127,6 +128,6 @@ The builder calls `keprompt chat new --prompt generate_questions --set breadcrum
 3. Set `CORPUS = "your-corpus-id"`
 4. Tune `_XREF_PATTERNS` and the xref map builder for the new format
 5. Update `write_corpus_md()` Name/Description/Example
-6. Keep the shared infrastructure (`setup_output`, `build_section_entries`, `rebuild_chroma_from_db`, `process_section`) unchanged unless the contract changes
+6. Keep the shared infrastructure (`setup_output`, `build_section_entries`, `rebuild_faiss_from_db`, `process_section`) unchanged unless the contract changes
 7. Write a sibling `generate_questions.prompt`
 8. Validate: `--print-tree` first, then `--skip-questions` full run, then full build with `--limit`, then full production build

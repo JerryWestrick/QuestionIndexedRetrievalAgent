@@ -157,6 +157,8 @@ KePrompt speaks to providers via LiteLLM. Env var conventions are LiteLLM's — 
 
 ## Known gotchas
 
+0. **`keprompt init` is MANDATORY in every project dir — missing it fails silently (-ish).** Symptom: every `.exec` in that project errors `Not Defined Error: Model <provider>/<model> is not defined`, `chat show` reports `total_api_calls: 0`, `status: "error"`, and the calling builder takes its fallback path without any hint why. A hand-made `prompts/` directory with just a `.prompt` file in it is not enough — keprompt needs `prompts/functions/model_prices_and_context_window.json` (the LiteLLM model DB, downloaded by `init`) to resolve model names. Observed 2026-04-14 in eu-ai-act mitigation test — 404 sections, 0 LLM questions, 0 cost, looked like a build but wasn't. Always `keprompt init` before the first `chat new` in a new project dir, and re-run it if the `functions/` dir gets lost.
+
 1. **Venv activation.** If the external function fails with `ModuleNotFoundError`, the venv is not active when keprompt was invoked. See "Venv sensitivity" above.
 2. **`.functions` wildcard.** `.functions qira` ≠ `.functions qira.*`. The former is a literal name, the latter is a prefix match.
 3. **`.functions` ordering.** Must precede `.system` / `.user`.

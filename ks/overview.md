@@ -14,9 +14,9 @@ Delivery model (per memory): corpus zips as product, no pip package, marketplace
 | `docs/` | Human design docs. `concept → architecture → design → qi-pipeline → qi-ra-interface → prompt-template` + `competition-study`. |
 | `ks/` | This directory. Claude-oriented shared understanding. |
 | `runtime/` | The QIRA runtime. Single file: `runtime/qira` (Python, KePrompt external function). |
-| `corpus/` | Distributable corpus zips. Currently: `python-stdlib.zip` (11 MB, onnxruntime default), `eu-ai-act.zip` (25 MB, sentence-transformers). Both **uncommitted**. |
+| `corpus/` | Distributable corpus zips. Currently: `python-stdlib.zip` (~11 MB), `eu-ai-act.zip` (~25 MB). Both built with Model2Vec (`potion-base-8M`) + FAISS. Both **uncommitted**. |
 | `examples/` | Reference QI builders, one per source format. |
-| `.venv/` | Project virtualenv. Has `chromadb`, `sentence-transformers`, `docutils`, etc. |
+| `.venv/` | Project virtualenv. Has `model2vec`, `faiss-cpu`, `docutils`, etc. No `chromadb`, no `onnxruntime`. |
 | `.claude/settings.local.json` | Project-level Claude Code settings. |
 
 ## `docs/` — human design layer
@@ -48,7 +48,7 @@ Each example is a **self-contained reference QI builder** for one source format.
 | Dir | Source format | Status |
 |---|---|---|
 | `examples/python-stdlib/` | CPython RST docs via `docutils` | Built. Corpus zip shipped in `corpus/python-stdlib.zip`. `build_corpus.py` is 880 lines. |
-| `examples/eu-ai-act/` | EUR-Lex Formex 4 XML | **Build complete, corpus zip built and plumbing-validated.** 404 sections, 13,012 questions. Builder is 1340 lines. Uncommitted (gitignored `.build/` dir + modified runtime + corpus/eu-ai-act.zip). Ship gated on embedding-backend decision — see `project_embedding_backend_decision.md` in memory. |
+| `examples/eu-ai-act/` | EUR-Lex Formex 4 XML | **Shipped.** 404 sections. Builder is 1340 lines. Corpus zip at `corpus/eu-ai-act.zip`. |
 
 Each example dir has:
 - `build_corpus.py` — the builder
@@ -59,7 +59,7 @@ Each example dir has:
 ## Runtime vs build dependency direction
 
 ```
-Source docs ──► [example builder] ──► corpus dir (SQLite + chroma/ + corpus.md)
+Source docs ──► [example builder] ──► corpus dir (SQLite + .faiss + corpus.md)
                                               │
                                               ▼
                                        runtime/qira  (reads corpus dir)

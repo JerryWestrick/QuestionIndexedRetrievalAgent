@@ -17,19 +17,32 @@ import argparse
 import json
 import os
 import re
-import shutil
 import sqlite3
 import subprocess
 import sys
-import threading
 import time
 import xml.etree.ElementTree as ET
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import chromadb
-from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
+import faiss
+import numpy as np
+
+
+# ---------------------------------------------------------------------------
+# Model loading (lazy — loaded once per build)
+# ---------------------------------------------------------------------------
+
+EMBEDDING_MODEL = "minishlab/potion-base-8M"
+
+_MODEL = None
+
+def _get_model():
+    global _MODEL
+    if _MODEL is None:
+        from model2vec import StaticModel
+        _MODEL = StaticModel.from_pretrained(EMBEDDING_MODEL)
+    return _MODEL
 
 
 # ---------------------------------------------------------------------------
@@ -856,8 +869,8 @@ def call_keprompt(section: Section, keprompt_dir: Path) -> list:
     Section content is passed directly via `--set content <text>`. We do not
     write a temp file: subprocess.run with an argv list is binary-safe and the
     AI Act's longest sections (~7 KB) fit comfortably under ARG_MAX. On any
-    failure (non-zero exit, timeout, malformed JSON, parse error) the worker
-    falls back to a single stub question rather than aborting the build.
+    failure (non-zero exit, timeout, malformed JSON, parse error) we fall back
+    to a single stub question rather than aborting the build.
     """
     content = section.content_md or section.title
     if not content.strip():
@@ -943,34 +956,30 @@ def build_section_entries(section: Section, questions: list) -> tuple:
 
 
 # ---------------------------------------------------------------------------
-# Stage 6: Storage setup, per-section worker, and finalisation
+# Stage 6: Storage setup, per-section processing, and finalisation
 # ---------------------------------------------------------------------------
 
 def setup_output(output_dir: Path, *, fresh: bool = False) -> tuple:
-    """Create (or reopen) the output dir + SQLite DB/table + ChromaDB collection.
+    """Create (or reopen) the output dir + SQLite DB with sections + questions tables.
 
-    Returns (conn, collection, db_path, chroma_path). The connection is opened
-    with check_same_thread=False so the worker pool can share it under the
-    db_lock; ChromaDB writes also go through the same lock.
+    Returns (conn, db_path, faiss_path).
 
-    If *fresh* is True, wipe both the DB and ChromaDB directory.
-    Otherwise reuse existing SQLite data (resume mode).  ChromaDB is always
-    rebuilt from SQLite on resume because it has no WAL and can corrupt on
-    unclean shutdown.
+    If *fresh* is True, wipe the DB and any existing FAISS index.
+    Otherwise reuse existing SQLite data (resume mode).  The FAISS index is
+    always rebuilt in memory from the SQLite questions table and written to
+    disk only at the end of a successful build.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     db_path = output_dir / f"{CORPUS}.db"
-    chroma_path = output_dir / "chroma"
+    faiss_path = output_dir / f"{CORPUS}.faiss"
 
     if fresh:
         if db_path.exists():
             db_path.unlink()
-    # Always wipe chroma — it can't survive unclean shutdowns.
-    # It gets rebuilt from SQLite below.
-    if chroma_path.exists():
-        shutil.rmtree(chroma_path)
+        if faiss_path.exists():
+            faiss_path.unlink()
 
-    conn = sqlite3.connect(str(db_path), check_same_thread=False)
+    conn = sqlite3.connect(str(db_path))
     conn.execute("""
         CREATE TABLE IF NOT EXISTS sections (
             id TEXT PRIMARY KEY,
@@ -979,43 +988,66 @@ def setup_output(output_dir: Path, *, fresh: bool = False) -> tuple:
             read_entry TEXT NOT NULL
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS questions (
+            idx INTEGER PRIMARY KEY,
+            section_id TEXT NOT NULL,
+            question TEXT NOT NULL
+        )
+    """)
     conn.commit()
 
-    client = chromadb.PersistentClient(path=str(chroma_path))
-    ef = SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
-    collection = client.create_collection("questions", embedding_function=ef)
-
-    return conn, collection, db_path, chroma_path
+    return conn, db_path, faiss_path
 
 
-def rebuild_chroma_from_db(conn: sqlite3.Connection, collection) -> int:
-    """Re-index existing SQLite sections into a fresh ChromaDB collection.
-
-    Extracts questions from search_entry (lines matching '- *...*') and adds
-    them to ChromaDB.  Returns the next doc_id to use.
+def _backfill_questions_from_search_entry(conn: sqlite3.Connection) -> int:
+    """If `questions` is empty but `sections` is populated, extract questions
+    from each section's search_entry (lines matching '- *...*') and populate
+    the questions table. Used to migrate pre-Model2Vec corpora forward without
+    redoing the expensive LLM call phase.
     """
-    import re
-    rows = conn.execute("SELECT id, search_entry FROM sections").fetchall()
-    if not rows:
-        return 0
-    doc_id = 0
+    sec_count = conn.execute("SELECT COUNT(*) FROM sections").fetchone()[0]
+    q_count = conn.execute("SELECT COUNT(*) FROM questions").fetchone()[0]
+    if sec_count == 0 or q_count > 0:
+        return q_count
+
     question_re = re.compile(r"^- \*(.+)\*$")
-    for section_id, search_entry in rows:
-        questions = []
+    idx = 0
+    for section_id, search_entry in conn.execute(
+        "SELECT id, search_entry FROM sections ORDER BY id"
+    ).fetchall():
         for line in search_entry.split("\n"):
             m = question_re.match(line)
             if m:
-                questions.append(m.group(1))
-        if questions:
-            ids = [f"q{doc_id + i}" for i in range(len(questions))]
-            collection.add(
-                documents=questions,
-                metadatas=[{"section_id": section_id}] * len(questions),
-                ids=ids,
-            )
-            doc_id += len(questions)
-    print(f"  Rebuilt ChromaDB: {doc_id} questions from {len(rows)} existing sections")
-    return doc_id
+                conn.execute(
+                    "INSERT INTO questions (idx, section_id, question) VALUES (?, ?, ?)",
+                    (idx, section_id, m.group(1)),
+                )
+                idx += 1
+    conn.commit()
+    print(f"  Backfilled questions table: {idx} questions from {sec_count} sections")
+    return idx
+
+
+def rebuild_faiss_from_db(conn: sqlite3.Connection) -> tuple:
+    """Rebuild an in-memory FAISS index from the questions table.
+
+    Re-encodes every question with Model2Vec in order of `idx` so the index
+    row indices match the stored `questions.idx` values. Returns (index, count).
+    """
+    _backfill_questions_from_search_entry(conn)
+    rows = conn.execute(
+        "SELECT idx, question FROM questions ORDER BY idx"
+    ).fetchall()
+    model = _get_model()
+    index = faiss.IndexFlatL2(model.dim)
+    if not rows:
+        return index, 0
+    texts = [r[1] for r in rows]
+    vecs = model.encode(texts).astype(np.float32)
+    index.add(vecs)
+    print(f"  Rebuilt FAISS: {len(rows)} questions re-encoded ({model.dim}-dim)")
+    return index, len(rows)
 
 
 def write_corpus_md(output_dir: Path):
@@ -1028,7 +1060,7 @@ EU AI Act
 Regulation (EU) 2024/1689 — the EU Artificial Intelligence Act. Full text including 180 recitals, 113 articles across 13 chapters, and 13 annexes. Covers prohibited AI practices, classification and obligations for high-risk AI systems, transparency rules, general-purpose AI models, governance, market surveillance, and penalties. Source: EUR-Lex (CELEX 32024R1689), Formex 4 XML, CC BY 4.0.
 
 ## Embedding
-sentence-transformers/all-MiniLM-L6-v2 (PyTorch)
+model2vec/potion-base-8M
 
 ## Example
 User asks: "Is using AI to score job applicants a high-risk activity under the EU AI Act?"
@@ -1053,21 +1085,19 @@ def process_section(
     section: Section,
     keprompt_dir: Path,
     conn: sqlite3.Connection,
-    collection,
+    faiss_index,
     index: int,
     total: int,
-    doc_id_counter: list,
+    next_doc_id: int,
     skip_questions: bool,
-    write_lock: threading.Lock,
 ) -> int:
-    """Process one section: keprompt → build entries → persist.
+    """Process one section: keprompt → build entries → persist. Returns the next
+    available question-idx counter value.
 
-    The keprompt call runs outside the lock (network-bound).
-    SQLite/ChromaDB writes are serialized via write_lock.
+    Strictly sequential — no locks, no threads. See ks/gotchas.md section 0.
     """
     tag = f"[{index}/{total}] {section.id} {section.title}"
 
-    # 1. Question generation (no lock needed — subprocess + network I/O)
     if skip_questions:
         crash_log(f"SECTION {section.id} — skip-questions")
         print(f"  {tag} — skip-questions (stub)", flush=True)
@@ -1081,36 +1111,31 @@ def process_section(
         crash_log(f"SECTION {section.id} — keprompt returned ({elapsed:.1f}s, {len(questions)} questions)")
         print(f"  {tag} — keprompt done ({elapsed:.1f}s, {len(questions)} questions)", flush=True)
 
-    # 2. Pre-format (no lock needed — pure computation on local data)
     crash_log(f"SECTION {section.id} — formatting entries")
     print(f"  {tag} — formatting entries...", flush=True)
     search_entry, read_entry = build_section_entries(section, questions)
 
-    # 3+4. Persist under lock (SQLite + ChromaDB + counter)
-    with write_lock:
-        crash_log(f"SECTION {section.id} — writing SQLite")
-        print(f"  {tag} — writing SQLite...", flush=True)
-        conn.execute(
-            "INSERT INTO sections (id, title, search_entry, read_entry) VALUES (?, ?, ?, ?)",
-            (section.id, section.title, search_entry, read_entry),
-        )
-        conn.commit()
+    crash_log(f"SECTION {section.id} — writing SQLite")
+    print(f"  {tag} — writing SQLite...", flush=True)
+    conn.execute(
+        "INSERT INTO sections (id, title, search_entry, read_entry) VALUES (?, ?, ?, ?)",
+        (section.id, section.title, search_entry, read_entry),
+    )
+    conn.executemany(
+        "INSERT INTO questions (idx, section_id, question) VALUES (?, ?, ?)",
+        [(next_doc_id + i, section.id, q) for i, q in enumerate(questions)],
+    )
+    conn.commit()
 
-        crash_log(f"SECTION {section.id} — writing ChromaDB ({len(questions)} vectors)")
-        print(f"  {tag} — writing ChromaDB ({len(questions)} vectors)...", flush=True)
-        ids = []
-        for _ in questions:
-            ids.append(f"q{doc_id_counter[0]}")
-            doc_id_counter[0] += 1
-        collection.add(
-            documents=list(questions),
-            metadatas=[{"section_id": section.id}] * len(questions),
-            ids=ids,
-        )
+    crash_log(f"SECTION {section.id} — embedding + FAISS ({len(questions)} vectors)")
+    print(f"  {tag} — embedding + FAISS ({len(questions)} vectors)...", flush=True)
+    model = _get_model()
+    vecs = model.encode(list(questions)).astype(np.float32)
+    faiss_index.add(vecs)
 
     crash_log(f"SECTION {section.id} — DONE")
     print(f"  {tag} — DONE", flush=True)
-    return len(questions)
+    return next_doc_id + len(questions)
 
 
 # ---------------------------------------------------------------------------
@@ -1146,8 +1171,6 @@ def main():
     parser.add_argument("--output", required=True, help="Output corpus directory")
     parser.add_argument("--skip-questions", action="store_true",
                         help="Skip LLM question generation (use fallback questions)")
-    parser.add_argument("--parallel", type=int, default=10,
-                        help="Number of parallel workers (default: 10)")
     parser.add_argument("--fresh", action="store_true",
                         help="Wipe existing corpus DB and start from scratch "
                              "(default: resume — skip sections already in DB)")
@@ -1239,10 +1262,10 @@ def main():
                   "into a prompts/ subdir of the example.", file=sys.stderr)
             sys.exit(1)
 
-        workers = args.parallel
         print(f"\nReady to process {len(all_sections)} sections.")
-        print(f"  Mode:           {'sequential' if workers <= 1 else f'{workers} parallel workers'}")
-        print(f"  Embedding:      sentence-transformers/all-MiniLM-L6-v2 (PyTorch)")
+        print(f"  Mode:           strictly sequential (no threads, no locks)")
+        print(f"  Embedding:      {EMBEDDING_MODEL} (Model2Vec)")
+        print(f"  Index:          FAISS IndexFlatL2")
         print(f"  Model:          cerebras/gpt-oss-120b (per generate_questions.prompt)")
         print(f"  Estimated cost: ~${len(all_sections) * 0.0007:.2f}")
         if args.yes:
@@ -1253,7 +1276,7 @@ def main():
                 print("Aborted.")
                 sys.exit(0)
 
-    # Step 8: Set up output storage (DB + Chroma collection live for the worker pool)
+    # Step 8: Set up output storage (DB + Chroma collection)
     output = Path(args.output)
     print(f"\nSetting up output: {output}")
 
@@ -1261,65 +1284,43 @@ def main():
     crash_log_open(output.parent / "crash.log")
     crash_log(f"sections={len(all_sections)} skip_questions={args.skip_questions}")
 
-    conn, collection, db_path, chroma_path = setup_output(output, fresh=args.fresh)
+    conn, db_path, faiss_path = setup_output(output, fresh=args.fresh)
 
-    # Resume: rebuild chroma from SQLite, skip sections already in the DB
+    # Rebuild in-memory FAISS from whatever questions already exist in SQLite.
+    # On --fresh this yields an empty index; on resume it rehydrates prior work.
     existing_ids = set()
-    existing_q_count = 0
     if not args.fresh:
         cursor = conn.execute("SELECT id FROM sections")
         existing_ids = {row[0] for row in cursor.fetchall()}
         if existing_ids:
             print(f"  Resuming: {len(existing_ids)} sections already in DB, skipping them")
-            existing_q_count = rebuild_chroma_from_db(conn, collection)
+    faiss_index, existing_q_count = rebuild_faiss_from_db(conn)
     remaining = [s for s in all_sections if s.id not in existing_ids]
 
-    # Step 9: Process sections
-    workers = args.parallel if not args.skip_questions else 1
-    mode = "sequentially" if workers <= 1 else f"with {workers} workers"
-    print(f"\nProcessing {len(remaining)} sections {mode} "
+    # Step 9: Process sections — strictly sequential. See ks/gotchas.md section 0.
+    print(f"\nProcessing {len(remaining)} sections sequentially "
           f"({len(all_sections) - len(remaining)} already done)...")
-    doc_id_counter = [existing_q_count]
-    write_lock = threading.Lock()
+    next_doc_id = existing_q_count
     total = len(remaining)
 
     errors = 0
-    if workers <= 1:
-        for i, section in enumerate(remaining, 1):
-            try:
-                process_section(
-                    section, keprompt_dir, conn, collection,
-                    i, total, doc_id_counter,
-                    args.skip_questions, write_lock,
-                )
-            except Exception as e:
-                print(f"  ERROR on {section.id} {section.title}: {e}",
-                      file=sys.stderr, flush=True)
-                errors += 1
-    else:
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {
-                pool.submit(
-                    process_section,
-                    section, keprompt_dir, conn, collection,
-                    i, total, doc_id_counter,
-                    args.skip_questions, write_lock,
-                ): section
-                for i, section in enumerate(remaining, 1)
-            }
-            for future in as_completed(futures):
-                section = futures[future]
-                try:
-                    future.result()
-                except Exception as e:
-                    print(f"  ERROR on {section.id} {section.title}: {e}",
-                          file=sys.stderr, flush=True)
-                    errors += 1
+    for i, section in enumerate(remaining, 1):
+        try:
+            next_doc_id = process_section(
+                section, keprompt_dir, conn, faiss_index,
+                i, total, next_doc_id,
+                args.skip_questions,
+            )
+        except Exception as e:
+            print(f"  ERROR on {section.id} {section.title}: {e}",
+                  file=sys.stderr, flush=True)
+            errors += 1
 
-    # Step 10: Finalise — close DB, write corpus.md, summary
+    # Step 10: Finalise — write FAISS, close DB, write corpus.md, summary
     conn.close()
+    faiss.write_index(faiss_index, str(faiss_path))
     print(f"SQLite: {db_path}")
-    print(f"ChromaDB: {chroma_path}")
+    print(f"FAISS:  {faiss_path} ({faiss_index.ntotal} vectors)")
 
     write_corpus_md(output)
     print(f"Corpus identity: {output / 'corpus.md'}")
@@ -1328,7 +1329,7 @@ def main():
     print("BUILD COMPLETE")
     print("=" * 60)
     print(f"Sections:  {len(all_sections)}")
-    print(f"Questions: {doc_id_counter[0]}")
+    print(f"Questions: {next_doc_id}")
     print(f"Errors:    {errors}")
     print(f"Output:    {output}")
     print(f"\nTest with:")

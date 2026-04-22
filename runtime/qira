@@ -13,77 +13,45 @@ Release mode (called by engineer when corpora change):
 """
 
 import json
-import os
-import platform
 import sqlite3
-import subprocess
 import sys
 from pathlib import Path
 from string import Template
 
-
-def _is_numa() -> bool:
-    """True if this host has >1 NUMA node (i.e. multi-socket)."""
-    system = platform.system()
-    if system == "Linux":
-        try:
-            return sum(
-                1 for d in os.listdir("/sys/devices/system/node/")
-                if d.startswith("node") and d[4:].isdigit()
-            ) > 1
-        except OSError:
-            return False
-    if system == "Darwin":
-        try:
-            return int(subprocess.check_output(["sysctl", "-n", "hw.packages"])) > 1
-        except Exception:
-            return False
-    return False
-
-
-# Must run before `import chromadb` — onnxruntime's threadpool reads
-# ORT_DISABLE_CPU_AFFINITY at init. On multi-socket Haswell-EP and similar,
-# its default cross-socket affinity calls can hard-reset the host.
-if "--SET-ORT_DISABLE_CPU_AFFINITY" in sys.argv:
-    os.environ["ORT_DISABLE_CPU_AFFINITY"] = "1"
-    sys.argv.remove("--SET-ORT_DISABLE_CPU_AFFINITY")
-
-if _is_numa() and not os.environ.get("ORT_DISABLE_CPU_AFFINITY"):
-    sys.exit(
-        "qira: multi-socket/NUMA host detected — onnxruntime may hard-reset the machine.\n"
-        "Pick one:\n"
-        "  - re-run with --SET-ORT_DISABLE_CPU_AFFINITY (qira sets the env var itself)\n"
-        "  - export ORT_DISABLE_CPU_AFFINITY=1 before invoking qira"
-    )
-
-import chromadb
-from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
+import faiss
+import numpy as np
 
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
-# During KePrompt function execution, cwd = project root.
-# During --list-functions discovery, cwd = prompts/functions/.
-# We detect which context we're in and set CORPUS_DIR accordingly.
+EMBEDDING_MODEL = "minishlab/potion-base-8M"
+
+# Lazy model load: qira_read and --initialize don't need the model; only
+# qira_search does. Loading on import would slow every invocation.
+_MODEL = None
+
+def _get_model():
+    global _MODEL
+    if _MODEL is None:
+        from model2vec import StaticModel
+        _MODEL = StaticModel.from_pretrained(EMBEDDING_MODEL)
+    return _MODEL
+
 
 def find_corpus_dir():
     """Locate the qira-corpus directory relative to this script."""
     script_dir = Path(__file__).resolve().parent
-    # When installed in prompts/functions/, corpus is a sibling directory
     candidate = script_dir / "qira-corpus"
     if candidate.is_dir():
         return candidate
-    # Fallback: check relative to cwd (development/testing)
     candidate = Path.cwd() / "qira-corpus"
     if candidate.is_dir():
         return candidate
-    # Fallback: check test-corpus in project root (development)
     candidate = Path.cwd() / "test-corpus"
     if candidate.is_dir():
         return candidate
-    # Fallback: check test-corpus relative to script
     candidate = script_dir.parent / "test-corpus"
     if candidate.is_dir():
         return candidate
@@ -177,31 +145,14 @@ def open_db(corpus):
     return conn
 
 
-def _get_embedding_function(corpus):
-    """Read corpus.md to determine which embedding function to use."""
-    corpus_md = CORPUS_DIR / corpus / "corpus.md"
-    if corpus_md.exists():
-        sections = parse_corpus_md(corpus_md)
-        embedding = sections.get("Embedding", "")
-        if "sentence-transformers" in embedding.lower():
-            model = "all-MiniLM-L6-v2"  # default; could parse from string
-            return SentenceTransformerEmbeddingFunction(model_name=model)
-    # Fall back to chromadb default (onnxruntime) for older corpora
-    return None
-
-
-def open_chroma(corpus):
-    """Open ChromaDB collection for a corpus."""
-    chroma_path = CORPUS_DIR / corpus / "chroma"
-    if not chroma_path.exists():
+def open_index(corpus):
+    """Load the FAISS index for a corpus."""
+    idx_path = CORPUS_DIR / corpus / f"{corpus}.faiss"
+    if not idx_path.exists():
         raise FileNotFoundError(
-            f"ChromaDB not found for corpus '{corpus}'"
+            f"FAISS index not found for corpus '{corpus}'"
         )
-    client = chromadb.PersistentClient(path=str(chroma_path))
-    ef = _get_embedding_function(corpus)
-    if ef:
-        return client.get_collection("questions", embedding_function=ef)
-    return client.get_collection("questions")
+    return faiss.read_index(str(idx_path))
 
 
 # ---------------------------------------------------------------------------
@@ -210,31 +161,32 @@ def open_chroma(corpus):
 
 def qira_search(corpus, question, n_results=5):
     """Search a corpus for sections matching a question."""
-    collection = open_chroma(corpus)
     db = open_db(corpus)
-
     try:
-        # Query ChromaDB — it embeds the question internally
-        results = collection.query(
-            query_texts=[question],
-            n_results=n_results,
-            include=["metadatas", "distances"]
-        )
+        index = open_index(corpus)
+        model = _get_model()
+        qv = model.encode([question]).astype(np.float32)
+        D, I = index.search(qv, n_results)
 
-        section_ids = results["metadatas"][0]
-        distances = results["distances"][0]
-
-        if not section_ids:
-            return "## Nothing Found\n"
-
-        # Deduplicate: group by section_id, keep best (lowest) distance
+        # Map FAISS row indices → section_ids via the questions table.
+        # Dedupe: keep the lowest distance per section_id.
         best = {}
-        for meta, dist in zip(section_ids, distances):
-            sid = meta["section_id"]
+        for idx, dist in zip(I[0].tolist(), D[0].tolist()):
+            if idx < 0:
+                continue  # FAISS returns -1 when fewer than n_results exist
+            row = db.execute(
+                "SELECT section_id FROM questions WHERE idx = ?",
+                (idx,)
+            ).fetchone()
+            if row is None:
+                continue
+            sid = row["section_id"]
             if sid not in best or dist < best[sid]:
                 best[sid] = dist
 
-        # Fetch from SQLite and assemble, ordered by distance
+        if not best:
+            return "## Nothing Found\n"
+
         output_parts = []
         for sid, dist in sorted(best.items(), key=lambda x: x[1]):
             row = db.execute(
@@ -265,7 +217,7 @@ def qira_read(section_id):
             f"invalid section_id '{section_id}' — expected format: corpus:hierarchy"
         )
 
-    corpus, hierarchy = section_id.split(":", 1)
+    corpus, _ = section_id.split(":", 1)
     db = open_db(corpus)
 
     try:
@@ -409,7 +361,6 @@ def initialize():
         worked_example=worked_example
     )
 
-    # Write qira.prompt next to this script
     script_dir = Path(__file__).resolve().parent
     output_path = script_dir / "qira.prompt"
     output_path.write_text(prompt)
@@ -423,8 +374,7 @@ def initialize():
 def main():
     if len(sys.argv) < 2:
         print(
-            "Usage: qira [--list-functions|--initialize|--version|function_name]\n"
-            "  --SET-ORT_DISABLE_CPU_AFFINITY  prepended flag: set the env var before chromadb loads",
+            "Usage: qira [--list-functions|--initialize|--version|function_name]",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -436,14 +386,13 @@ def main():
         return
 
     if command == "--version":
-        print("qira 0.1.0")
+        print("qira 0.2.0")
         return
 
     if command == "--initialize":
         initialize()
         return
 
-    # Function execution: read JSON from stdin
     if command not in FUNCTION_MAP:
         print(f"Error: unknown function '{command}'", file=sys.stderr)
         sys.exit(1)

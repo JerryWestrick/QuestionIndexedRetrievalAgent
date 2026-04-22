@@ -9,11 +9,11 @@ Purpose: shared understanding of QIRA, written for **Claude** as reader, not for
 Read in this order at session start when the task touches QIRA internals:
 
 1. **overview.md** — what's in the repo, where each thing lives
-2. **contract.md** — the non-negotiable QI/RA storage contract (corpus dir, SQLite, ChromaDB, markdown formats)
-3. **runtime.md** — how `runtime/qira` behaves: CLI modes, corpus discovery, embedding selection
+2. **contract.md** — the non-negotiable QI/RA storage contract (corpus dir, SQLite, FAISS, markdown formats)
+3. **runtime.md** — how `runtime/qira` behaves: CLI modes, corpus discovery, embedding model
 4. **building-corpora.md** — QI pipeline condensed; pointers to example builders
 5. **keprompt.md** — the LLM harness QIRA runs under; `.prompt` format, external function protocol, `chat show` observability
-6. **gotchas.md** — operational hazards (onnxruntime/Haswell crash, chroma-on-resume, embedding-fn mismatch)
+6. **gotchas.md** — operational hazards (historical onnxruntime/Haswell crash, FAISS-rebuild invariant, FAISS→SQLite mismatch)
 
 ## Rules for writing into ks/
 

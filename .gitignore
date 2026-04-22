@@ -210,5 +210,8 @@ __marimo__/
 .idea/
 prompts/chats.db
 examples/*/.build/
+examples/*/prompts/
+test-corpus/
+.build_tmp_*.py
 *.tmp
 tmp_section.md

@@ -8,12 +8,12 @@
 
 ```
 {corpus}/
-  {corpus}.db       # SQLite — sections only
-  chroma/           # ChromaDB — question vector index
+  {corpus}.db       # SQLite — sections + questions
+  {corpus}.faiss    # FAISS IndexFlatL2 — question vector index
   corpus.md         # Corpus identity (name, description, embedding, example)
 ```
 
-`{corpus}` is lowercase, hyphenated (e.g. `python-stdlib`, `eu-ai-act`). The directory name, the DB filename, and the section ID prefix must all agree.
+`{corpus}` is lowercase, hyphenated (e.g. `python-stdlib`, `eu-ai-act`). The directory name, the DB filename, the FAISS filename, and the section ID prefix must all agree.
 
 ## Section ID
 
@@ -21,7 +21,7 @@ Format: `{corpus}:{hierarchy}` — always, everywhere, no exceptions.
 
 - `{hierarchy}` is dot-separated numeric: `3`, `3.2`, `3.2.4`
 - Full ID example: `eu-ai-act:4.2.1`
-- The corpus prefix appears in every ID in every context (SQLite keys, ChromaDB metadata, markdown content, cross-refs, `qira_read` args). There is **no** "local" or "unprefixed" form.
+- The corpus prefix appears in every ID in every context (SQLite `sections.id`, SQLite `questions.section_id`, markdown content, cross-refs, `qira_read` args). There is **no** "local" or "unprefixed" form.
 
 Navigation is derived from the ID itself — no extra metadata:
 - Parent: strip trailing `.N`
@@ -30,7 +30,9 @@ Navigation is derived from the ID itself — no extra metadata:
 
 ## SQLite schema: `{corpus}.db`
 
-One table: `sections`. No metadata table (corpus identity lives in `corpus.md`).
+Two tables. No metadata table (corpus identity lives in `corpus.md`).
+
+### `sections`
 
 | Column | Type | Description |
 |---|---|---|
@@ -39,18 +41,23 @@ One table: `sections`. No metadata table (corpus identity lives in `corpus.md`).
 | `search_entry` | TEXT NOT NULL | Pre-formatted markdown **body** for search hits. RA adds the h2 heading at runtime. |
 | `read_entry` | TEXT NOT NULL | Pre-formatted markdown served **verbatim** by `qira_read`. |
 
-## ChromaDB schema: `chroma/`
+### `questions`
 
-Collection name: `questions`. One entry per generated question (N per section).
+One row per generated question (N per section). The FAISS row index matches `questions.idx`.
 
-| Field | Content |
-|---|---|
-| `document` | The question text |
-| `embedding` | Vector of the question (ChromaDB handles embedding internally) |
-| `metadata.section_id` | Full corpus-prefixed section ID (back-ref to `sections.id`) |
-| `ids` | Unique per-question doc ID (builder convention: `q0`, `q1`, ...) |
+| Column | Type | Description |
+|---|---|---|
+| `idx` | INTEGER PRIMARY KEY | FAISS row index. Contiguous from 0. |
+| `section_id` | TEXT NOT NULL | Full corpus-prefixed section ID (back-ref to `sections.id`) |
+| `question` | TEXT NOT NULL | The question text (same string that was embedded into FAISS row `idx`). |
 
-**Embedding ownership:** The embedding function is a **QI-only concern**. QI picks it, creates the collection with it, ChromaDB stores it. RA queries with `query_texts=[...]` and never imports an embedding library directly — *except* when the collection was created with a non-default embedding function, in which case RA must instantiate the same function to open the collection. See `ks/runtime.md` and `ks/gotchas.md`.
+## FAISS index: `{corpus}.faiss`
+
+Single `faiss.IndexFlatL2` over the embedded questions. Row count = `COUNT(*) FROM questions`. Vector at row `i` is the Model2Vec embedding of the question with `questions.idx = i`.
+
+**Embedding is shared between write and read.** The builder and `runtime/qira` both use the constant `EMBEDDING_MODEL = "minishlab/potion-base-8M"` (Model2Vec `StaticModel.from_pretrained(...)`). A corpus is bound to the embedding model it was built with; the runtime has exactly one `EMBEDDING_MODEL` and therefore assumes every corpus was built with the same model. Mixing embeddings across corpora is not supported.
+
+**SQLite is the source of truth.** The FAISS file is derived state — it can be rebuilt at any time from the `questions` table by re-encoding every `question` in `idx` order. See `ks/gotchas.md` #2.
 
 ## Markdown formats — THE CONTRACT
 
@@ -144,7 +151,7 @@ Sections are parsed in order; whitespace stripped. `--initialize` pulls `Name` +
 1. Produce the corpus directory with the structure above
 2. Populate `sections` with full corpus-prefixed IDs + titles
 3. Format `search_entry` body (no heading) and `read_entry` exactly as specified
-4. Populate ChromaDB with question embeddings linked to full corpus-prefixed section IDs
+4. Populate the `questions` table (`idx`, `section_id`, `question`) and write `{corpus}.faiss` so that FAISS row `i` is the embedding of `questions.idx = i`
 5. Rewrite all cross-references to full corpus-prefixed IDs
 6. Write `corpus.md` with the four required headings
 

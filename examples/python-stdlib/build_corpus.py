@@ -12,7 +12,6 @@ import argparse
 import json
 import os
 import re
-import shutil
 import sqlite3
 import subprocess
 import sys
@@ -20,7 +19,24 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import chromadb
+import faiss
+import numpy as np
+
+
+# ---------------------------------------------------------------------------
+# Model loading (lazy — loaded once per build)
+# ---------------------------------------------------------------------------
+
+EMBEDDING_MODEL = "minishlab/potion-base-8M"
+
+_MODEL = None
+
+def _get_model():
+    global _MODEL
+    if _MODEL is None:
+        from model2vec import StaticModel
+        _MODEL = StaticModel.from_pretrained(EMBEDDING_MODEL)
+    return _MODEL
 
 
 # ---------------------------------------------------------------------------
@@ -700,19 +716,19 @@ def preformat_entries(all_sections: list, questions: dict) -> list:
 # ---------------------------------------------------------------------------
 
 def store_corpus(entries: list, output_dir: Path):
-    """Write SQLite database and ChromaDB vector index."""
+    """Write SQLite database and FAISS index."""
     output_dir.mkdir(parents=True, exist_ok=True)
 
     db_path = output_dir / f"{CORPUS}.db"
-    chroma_path = output_dir / "chroma"
+    faiss_path = output_dir / f"{CORPUS}.faiss"
 
     # Clean previous build
     if db_path.exists():
         db_path.unlink()
-    if chroma_path.exists():
-        shutil.rmtree(chroma_path)
+    if faiss_path.exists():
+        faiss_path.unlink()
 
-    # SQLite
+    # SQLite — sections + questions tables
     conn = sqlite3.connect(str(db_path))
     conn.execute("""
         CREATE TABLE sections (
@@ -722,6 +738,13 @@ def store_corpus(entries: list, output_dir: Path):
             read_entry TEXT NOT NULL
         )
     """)
+    conn.execute("""
+        CREATE TABLE questions (
+            idx INTEGER PRIMARY KEY,
+            section_id TEXT NOT NULL,
+            question TEXT NOT NULL
+        )
+    """)
 
     for entry in entries:
         conn.execute(
@@ -729,24 +752,30 @@ def store_corpus(entries: list, output_dir: Path):
             (entry["id"], entry["title"], entry["search_entry"], entry["read_entry"])
         )
     conn.commit()
-    conn.close()
     print(f"SQLite: {db_path} ({len(entries)} sections)")
 
-    # ChromaDB
-    client = chromadb.PersistentClient(path=str(chroma_path))
-    collection = client.create_collection("questions")
+    # FAISS — embed all questions, add to index, store section_id mapping in SQLite
+    model = _get_model()
+    index = faiss.IndexFlatL2(model.dim)
 
-    doc_id = 0
+    idx_counter = 0
     for entry in entries:
-        for q in entry["questions"]:
-            collection.add(
-                documents=[q],
-                metadatas=[{"section_id": entry["id"]}],
-                ids=[f"q{doc_id}"]
-            )
-            doc_id += 1
+        qs = entry["questions"]
+        if not qs:
+            continue
+        vecs = model.encode(list(qs)).astype(np.float32)
+        index.add(vecs)
+        conn.executemany(
+            "INSERT INTO questions (idx, section_id, question) VALUES (?, ?, ?)",
+            [(idx_counter + i, entry["id"], q) for i, q in enumerate(qs)],
+        )
+        idx_counter += len(qs)
 
-    print(f"ChromaDB: {chroma_path} ({doc_id} questions)")
+    conn.commit()
+    conn.close()
+
+    faiss.write_index(index, str(faiss_path))
+    print(f"FAISS:  {faiss_path} ({idx_counter} questions, {model.dim}-dim)")
 
     # corpus.md
     corpus_md = output_dir / "corpus.md"
@@ -757,7 +786,7 @@ Python Standard Library
 Python standard library module documentation including functions, classes, methods, parameters, and usage examples.
 
 ## Embedding
-chromadb/default (all-MiniLM-L6-v2)
+model2vec/potion-base-8M
 
 ## Example
 User asks: "How do I pretty-print a JSON string in Python?"
