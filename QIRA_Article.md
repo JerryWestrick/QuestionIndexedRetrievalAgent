@@ -344,12 +344,10 @@ Expected: five `qira_search` calls with progressive reformulation (*"liability o
 
 ### Inspect the internal tool-call trace
 
-Every chat keprompt runs is logged to `prompts/chats.db` (SQLite). The exact tool-call sequence shown in §6 was reconstructed from this log:
+Every chat keprompt runs is logged to `prompts/chats.db`. To see the full tool-call sequence for a given run, use:
 
-```sql
-SELECT json_extract(value,'$.name'), json_extract(value,'$.arguments')
-FROM chats, json_each(messages_json)
-WHERE chat_id = ? AND json_extract(value,'$.type') = 'tool';
+```bash
+keprompt show chat <chat_id> --pretty
 ```
 
 The `chat_id` is printed at the end of each run (e.g. `Chat e3473544:1 ...`).

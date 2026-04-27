@@ -7,6 +7,12 @@ Get a working QIRA setup from a cold install and verify it in two stages:
 
 If plumbing fails, the corpus or the Python environment is the problem. If plumbing passes but the full test fails, the keprompt wiring or LLM credentials are the problem. The split lets you localize any failure fast.
 
+> **Just want to try the EU AI Act corpus end-to-end without reading this?** Run the one-shot installer:
+> ```bash
+> curl -L https://github.com/JerryWestrick/QuestionIndexedRetrievalAgent/raw/main/examples/eu-ai-act/try-eu-ai-act.sh | bash
+> ```
+> It does steps 1–4 and 6a below in a single command, leaves you a ready-to-run demo prompt, and prints next steps. Come back here if you want to understand each piece, install a different corpus, or debug.
+
 ## Prerequisites
 
 - **Python 3.12 or later**, with `pip` and the `venv` module
@@ -25,20 +31,21 @@ source .venv/bin/activate
 
 The directory you are standing in is your **keprompt project directory**. After `pip install keprompt`, keprompt treats the current working directory as the project root.
 
-> **Keep the venv activated** for every step below. The `qira` runtime has a generic `#!/usr/bin/env python3` shebang and inherits whichever `python3` is on PATH. If keprompt (or you) spawn `qira` from a shell where the venv is not active, `qira` will not find `chromadb` and will fail.
+> **Keep the venv activated** for every step below. The `qira` runtime has a generic `#!/usr/bin/env python3` shebang and inherits whichever `python3` is on PATH. If keprompt (or you) spawn `qira` from a shell where the venv is not active, `qira` will not find `faiss` or `model2vec` and will fail.
 
 ## 2. Install the Required Python Packages
 
 ```bash
-pip install chromadb keprompt
+pip install keprompt faiss-cpu model2vec
 ```
 
-Only two direct packages:
+Three direct packages:
 
-- **`chromadb`** — the vector store that the qira runtime opens to do question-to-question search. Transitively brings in `onnxruntime` (used by ChromaDB's default embedding function, which is what the `python-stdlib` corpus was built with) and ~70 other transitive dependencies. No manual dependency hunting required.
 - **`keprompt`** — the LLM harness. Discovers external functions, routes tool calls to them, and runs conversations against whichever model you configure. Needed for project initialization (step 3) and for the **full test** (step 6); the plumbing test (step 5) does not use it.
+- **`faiss-cpu`** — Facebook AI's vector index library. The qira runtime opens an on-disk FAISS `IndexFlatL2` for each corpus and uses it to do question-to-question search. Pure CPU, no GPU required.
+- **`model2vec`** — the embedding backend. Loads `minishlab/potion-base-8M` (~30 MB, downloaded from HuggingFace on first use) and produces the query vector that gets fed into FAISS. Static-embedding model, no PyTorch, no onnxruntime, no GPU.
 
-> **Haswell-EP / Xeon E5 v3 note.** If your host is a dual-socket Xeon E5 v3 (Haswell-EP) with hyperthreading enabled, onnxruntime has a documented thread-affinity pattern that can trigger a "929 Fatal MCA" hardware errata and hard-reset the box under sustained parallel load. Single-call runtime usage (one `qira_search`, one `qira_read`) has not been observed to trigger it, but if it does, set `export ORT_DISABLE_CPU_AFFINITY=1` before invoking `qira` or keprompt.
+That's the whole stack. No ChromaDB, no sentence-transformers, no PyTorch. The first `qira_search` call downloads the embedding model from HuggingFace and caches it under `~/.cache/huggingface/`. After that, every call is local and offline.
 
 ## 3. Initialize the KePrompt Project
 
@@ -69,10 +76,10 @@ After init, your project looks like this:
 Download a corpus zip and extract it into `prompts/functions/`. The zip contains the `qira` runtime executable *and* a `qira-corpus/{name}/` directory with the pre-built index. `unzip -d` will create `prompts/functions/` if `keprompt init` did not already.
 
 ```bash
-# Example: python-stdlib corpus from the QIRA repo
-curl -L -o /tmp/python-stdlib.zip \
-  https://github.com/JerryWestrick/QIRA/raw/main/corpus/python-stdlib.zip
-unzip /tmp/python-stdlib.zip -d prompts/functions/
+# Example: EU AI Act corpus
+curl -L -o /tmp/eu-ai-act.zip \
+  https://github.com/JerryWestrick/QuestionIndexedRetrievalAgent/raw/main/corpus/eu-ai-act.zip
+unzip /tmp/eu-ai-act.zip -d prompts/functions/
 chmod +x prompts/functions/qira
 ```
 
@@ -83,20 +90,22 @@ prompts/
 └── functions/
     ├── qira                            # runtime executable
     └── qira-corpus/
-        └── python-stdlib/
-            ├── corpus.md
-            ├── python-stdlib.db
-            └── chroma/
-                ├── chroma.sqlite3
-                └── <uuid>/...
+        └── eu-ai-act/
+            ├── corpus.md               # name, description, embedding, worked example
+            ├── eu-ai-act.db            # SQLite — sections, questions, metadata
+            └── eu-ai-act.faiss         # FAISS IndexFlatL2 — question vectors
 ```
+
+The SQLite file is the source of truth; the `.faiss` file is derived state that the builder rewrites from SQLite on every full build.
+
+> **Other corpora.** The `python-stdlib` corpus is also available at `https://github.com/JerryWestrick/QuestionIndexedRetrievalAgent/raw/main/corpus/python-stdlib.zip` if you want a second one to play with. Heads up: every modern LLM has memorized the Python standard library, so QIRA's value is invisible against it — search returns correct content but the LLM would have answered the same way without the corpus. Use `eu-ai-act` to see the difference. You can install multiple corpora into the same `prompts/functions/` directory and the runtime will treat them independently.
 
 ## 5. Plumbing Test — No LLM, No KePrompt
 
 This test validates that:
 
 - The `qira` runtime executes in your fresh venv
-- `chromadb` is importable (meaning step 2 worked)
+- `faiss` and `model2vec` are importable (meaning step 2 worked)
 - The corpus is readable
 - Function discovery, search, and read all return valid markdown matching the QI/RA contract
 
@@ -114,56 +123,56 @@ No LLM. No keprompt. No tool-calling. Just pipe JSON to the executable and read 
 [{"name": "qira_search", ...}, {"name": "qira_read", ...}]
 ```
 
-If you see `ModuleNotFoundError: No module named 'chromadb'`, the venv is not activated. Run `source .venv/bin/activate` and retry.
+If you see `ModuleNotFoundError: No module named 'faiss'` or `'model2vec'`, the venv is not activated. Run `source .venv/bin/activate` and retry.
 
 ### 5b. Search
 
 Ask a question that the corpus obviously covers:
 
 ```bash
-echo '{"corpus":"python-stdlib","question":"How do I pretty-print JSON?"}' \
+echo '{"corpus":"eu-ai-act","question":"What AI practices does the EU AI Act prohibit?"}' \
   | ./prompts/functions/qira qira_search
 ```
 
-**Expected output** — markdown with one or more `## -{distance}- python-stdlib:{id} {title}` headings, each followed by a `>` breadcrumb, bulleted italic questions, and a plain-text excerpt. Distances are floats (lower = better). Something like:
+**Expected output** — markdown with one or more `## -{distance}- eu-ai-act:{id} {title}` headings, each followed by a `>` breadcrumb, bulleted italic questions, and a plain-text excerpt. Distances are floats (lower = better). For this question the top hit should be `eu-ai-act:3 Chapter II — Prohibited AI Practices` at a distance around 0.20:
 
 ```
-## -0.50- python-stdlib:1 json — JSON encoder and decoder
-> Python Standard Library > json
-- *What is the purpose of the `json` module...*
+## -0.20- eu-ai-act:3 Chapter II — Prohibited AI Practices
+> EU AI Act > Chapter II — Prohibited AI Practices
+- *What is the title of Chapter II in the EU AI Act?*
+- *Which chapter of the EU AI Act deals with prohibited AI practices?*
 - *...*
 
-**Source code:** `Lib/json/__init__.py`
-...
+Chapter II — Prohibited AI Practices
 ```
 
-First call is slow (a few seconds — ChromaDB loads the onnxruntime embedding model on startup). Subsequent calls in the same process are fast, but each invocation is a fresh process, so every plumbing-test call pays the cold-start cost.
+The first call in a fresh environment downloads the Model2Vec embedding model (~30 MB) from HuggingFace and is slower for that reason. Subsequent calls in the same process are fast, but each invocation is a fresh process, so every plumbing-test call pays a cold-start cost (model load + FAISS index load — sub-second once cached).
 
 ### 5c. Read
 
-Pick any section ID from the 5b output (for example `python-stdlib:1.1.2`) and read it:
+Pick any section ID from the 5b output (for example `eu-ai-act:3.1` for Article 5 — Prohibited AI practices) and read it:
 
 ```bash
-echo '{"section_id":"python-stdlib:1.1.2"}' \
+echo '{"section_id":"eu-ai-act:3.1"}' \
   | ./prompts/functions/qira qira_read
 ```
 
-**Expected output** — markdown starting with an `# {id} {title}` heading (h1, not h2 — h1 means "full read", h2 means "search hit"), followed by the breadcrumb and the full section content:
+**Expected output** — markdown starting with an `# {id} {title}` heading (h1, not h2 — h1 means "full read", h2 means "search hit"), followed by the breadcrumb and the full article text:
 
 ```
-# python-stdlib:1.1.2 dumps
-> Python Standard Library > json > Basic Usage > dumps
+# eu-ai-act:3.1 Article 5 — Prohibited AI practices
+> EU AI Act > Chapter II — Prohibited AI Practices > Article 5 — Prohibited AI practices
 
-`dumps(obj, *, skipkeys=False, ...)`
-
-Serialize *obj* to a JSON formatted `str`...
+**1.** The following AI practices shall be prohibited:
+  - (a) the placing on the market, the putting into service or the use of an AI system that deploys subliminal techniques...
+...
 ```
 
-**Plumbing test passes if 5a, 5b, and 5c all return valid markdown with no errors and no host crash.** At this point you have proved:
+**Plumbing test passes if 5a, 5b, and 5c all return valid markdown with no errors.** At this point you have proved:
 
 - The corpus zip is a valid QIRA corpus
 - Your Python environment can run the qira runtime
-- Every piece of the QI/RA storage contract (SQLite schema, ChromaDB schema, markdown formats) is intact end-to-end
+- Every piece of the QI/RA storage contract (SQLite schema, FAISS index, markdown formats) is intact end-to-end
 
 ## 6. Full Test — LLM + KePrompt
 
@@ -202,7 +211,7 @@ Create `prompts/test.prompt`:
 .functions qira.*
 .system You are a helpful assistant. When a user question could be answered from an available corpus, use qira_search and qira_read to ground your answer and cite the section IDs.
 .include prompts/functions/qira.prompt
-.user Using the provided documentation; Lookup how do I pretty-print JSON in Python, and which parameters of json.dumps control the output formatting?
+.user Using the provided documentation; what AI practices does the EU AI Act prohibit, and where in the regulation are they listed?
 .exec
 ```
 
@@ -230,14 +239,14 @@ Chat 24820074:1 with openai:openai/gpt-4o-mini Total Cost: $0.000739 (In: $0.000
 Context: Input 3,588/128,000 (2.8%) Output 334/16,384 (2.0%)
 ```
 
-The final answer should cite at least one `python-stdlib:...` section ID.
+The final answer should cite at least one `eu-ai-act:...` section ID (most likely `eu-ai-act:3.1` — Article 5).
 
 **Full test passes if:**
 
 - KePrompt discovered the qira functions without error (`Loaded N routines` line shows a non-zero count and no error)
 - The LLM called `qira_search` at least once (confirmable via `keprompt chat show`)
 - The LLM called `qira_read` at least once
-- The LLM's final answer references at least one section ID from the corpus (e.g. `python-stdlib:1.1.2`)
+- The LLM's final answer references at least one section ID from the corpus (e.g. `eu-ai-act:3.1`)
 
 **Inspect the full trace.** KePrompt records the whole conversation. To see every message, tool call, tool result, cost, and VM state, run:
 
@@ -253,18 +262,19 @@ where `{chat_id}` is the number printed in the summary line (e.g. `24820074`). T
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `ModuleNotFoundError: No module named 'chromadb'` | venv not active when `qira` was invoked | `source .venv/bin/activate`, retry |
+| `ModuleNotFoundError: No module named 'faiss'` or `'model2vec'` | venv not active when `qira` was invoked | `source .venv/bin/activate`, retry |
 | `qira: command not found` | Wrong working directory, or `chmod +x` was skipped | `cd ~/qira-test && chmod +x prompts/functions/qira` |
-| `Error: unknown corpus 'python-stdlib'. Available: ` | Zip extracted to the wrong location, or `qira-corpus/` is missing | Re-extract with `unzip ... -d prompts/functions/` |
-| `Error: section 'python-stdlib:1.1.2' not found` | Section ID copy-paste error, or corpus was built against an older ID scheme | Verify the ID from a fresh `qira_search` result |
-| Host hard-reset during plumbing test | Haswell-EP / Xeon E5 v3 929 MCA errata (onnxruntime pinning across HT siblings) | Disable hyperthreading in BIOS. `ORT_DISABLE_CPU_AFFINITY=1` alone is not sufficient under concurrent load. |
+| `Error: unknown corpus 'eu-ai-act'. Available: ` | Zip extracted to the wrong location, or `qira-corpus/` is missing | Re-extract with `unzip ... -d prompts/functions/` |
+| `Error: section 'eu-ai-act:3.1' not found` | Section ID copy-paste error, or corpus was built against an older ID scheme | Verify the ID from a fresh `qira_search` result |
+| `FAISS index not found for corpus 'X'` | Corpus zip is missing the `.faiss` file (older ChromaDB-era zip) | Download the current zip from the repo |
+| First `qira_search` hangs for 30+ seconds | Embedding model is being downloaded from HuggingFace on first use | Wait it out; subsequent calls are fast |
 | LLM never calls any qira function | Model does not support tool/function calling, or the user question does not obviously need the corpus | Use a model that supports tools; ask a question that is clearly covered by the corpus; nudge the user message with "Using the provided documentation; Lookup ..." |
 | `.functions qira` declared but the LLM can't see `qira_search`/`qira_read` | Bare name `qira` looks for a single function literally called `qira`, not a prefix | Use the wildcard form: `.functions qira.*` |
-| `ImportError` involving `onnxruntime` on an older CPU | CPU lacks AVX instructions onnxruntime requires | Upgrade hardware, or rebuild the corpus locally against a different embedding backend |
 
 ## Notes
 
 - **QIRA is a principle, not a Python package.** The deliverable is the pattern: question-indexed retrieval, LLM-driven, corpus directories, the QI/RA storage contract. The `runtime/qira` executable and the reference corpora in this repo are a practical, usable demonstration of that principle as a KePrompt external function. Other implementations are possible. See [docs/](docs/) for the design documents.
 - **Correctness is not tested here.** Whether the LLM gives a *good* answer depends on the corpus, the model, the prompt template, and the user's question. That is not a property QIRA itself can guarantee, and is not covered by the Quickstart. The Quickstart tests only that the plumbing is intact — given a good corpus and a good model, the pipes connect correctly.
 - **One plumbing test, many corpora.** If you install multiple corpus zips into the same `prompts/functions/qira-corpus/` directory, rerun `qira --initialize` and repeat step 5b with each corpus name. The runtime handles them independently.
-- **Upgrading the runtime.** When you replace a corpus zip, the `qira` executable is overwritten too. If multiple zips contain different versions, the one extracted last wins. All shipped corpora use the same embedding backend (ChromaDB default, onnxruntime `all-MiniLM-L6-v2`), so any version of the runtime that matches the contract will serve any of them.
+- **Why eu-ai-act and not python-stdlib?** The EU AI Act was published in July 2024, after most public LLM training cutoffs — so when the LLM cites `eu-ai-act:3.1`, you can verify the value QIRA added (the LLM didn't already know that text). The Python standard library, by contrast, is in every model's training data; QIRA returns the right content but the LLM would have answered the same way without it.
+- **Upgrading the runtime.** When you replace a corpus zip, the `qira` executable is overwritten too. If multiple zips contain different versions, the one extracted last wins. All shipped corpora use the same embedding backend (Model2Vec `potion-base-8M`), so any version of the runtime that matches the storage contract will serve any of them.
