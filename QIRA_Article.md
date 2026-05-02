@@ -45,6 +45,8 @@ The least intelligent components make the most critical decisions. The only comp
 
 This is not engineering. This is hope-based programming.
 
+A scope caveat: where documents have no structure — scraped web pages, chat logs, support tickets — RAG is the only option. No retrieval technique invents structure where none exists. QIRA's claim is narrower: when structure *is* present, use it; don't shred it into chunks and hope. The critique above is about that case.
+
 ---
 
 ## 3. Inverting the Architecture
@@ -242,7 +244,27 @@ At these economics, the "but LLM indexing is expensive" objection evaporates. Th
 
 ---
 
-## 8. Conclusion: Two Visitors to a Library
+## 8. Limitations
+
+This article presents an architectural argument and a worked example. It does not present a benchmark study. Reasonable skepticism is welcome on the following counts:
+
+- **N=1 worked example.** §6 reports one user question, two LLMs, against one corpus. Nothing here generalizes to a quantitative claim about retrieval quality across question types, domains, or model families. The "vocabulary-map" property in §6 is observed once; it is named as an emergent observation, not a measured effect.
+
+- **No systematic benchmark.** No head-to-head comparison against RAG-on-the-same-corpus, HyDE, RAPTOR, GraphRAG, or a fine-tuned domain model. Constructing such a benchmark — a gold-standard question set with reference answers, run across these systems — is substantial work that has not been done here. A reader who needs benchmarked numbers should treat QIRA as a hypothesis worth testing, not a measured improvement.
+
+- **Two corpora, both well-structured.** `python-stdlib` (Sphinx RST, machine-rendered) and `eu-ai-act` (EUR-Lex Formex 4 XML, professionally edited regulatory text) both have clean hierarchical structure. The architectural claim depends on that structure being available; corpora with weak or noisy structure (PDF dumps, OCR'd documents, mixed-quality web crawl) have not been tested. The §2 caveat applies — RAG remains the appropriate choice for genuinely unstructured material.
+
+- **LLM-generated index, not human-validated.** Question generation is a single LLM pass per section. The questions have not been human-reviewed for accuracy, completeness, or absence of confabulation. Index quality is bounded by the question-generation model; a wrong or shallow question for a section will produce wrong or shallow retrieval for that section.
+
+- **Single-author project.** No co-authors, no institutional review, no peer review. Bugs, oversights, and prior art the author missed are possible. Issues and corrections welcome at the repository.
+
+- **Harness coupling.** The runtime and Appendix A demo are tied to [KePrompt](https://github.com/jeremywestrick/keprompt) as the prompt-as-code harness. The QIRA contract is harness-agnostic, but ergonomic integration with other agent frameworks (LangChain, LlamaIndex, OpenAI Assistants, Claude Code tool-use, etc.) has not been built or tested.
+
+These are limitations of the current project state, not architectural defects of the design. QIRA is at the *validated* stage — the inversion works on real corpora, demonstrably. It is not at the *measured* stage — *outperforms alternative X by Y%*.
+
+---
+
+## 9. Conclusion: Two Visitors to a Library
 
 Imagine two people walk into a library with the same question.
 
@@ -394,7 +416,7 @@ The corpus isn't named in the prompt. The LLM picks a corpus at tool-call time b
 
 ```bash
 cd prompts/functions
-curl -L -O https://.../python-stdlib.zip  # or any other QIRA corpus zip
+curl -L -O https://.../python-stdlib.zip  # or another corpus zip you have built
 unzip python-stdlib.zip
 cd ../..
 ./prompts/functions/qira --initialize
@@ -464,4 +486,12 @@ QIRA composes three of these moves with one new attribute:
 What QIRA does **not** combine: cross-document graph relationships (GraphRAG territory) or query-time hypothetical document generation (HyDE territory). These are compatible additions, not competing alternatives.
 
 The contribution is the composition, not any single ingredient. A reader steeped in retrieval literature will recognize each part; the architectural claim is that *questions-as-index-unit + structured-document preservation + agent-driven traversal* is a coherent and engineerable system whose cost economics (§7) make it practical at index build time.
+
+---
+
+## About
+
+QIRA is the work of [Jerry Westrick](mailto:jerry@westrick.com). Questions, critiques, corrections, and prior-art pointers are welcome — open an issue at [the repository](https://github.com/JerryWestrick/QuestionIndexedRetrievalAgent) or email directly.
+
+For organizations with structured documents that need to be LLM-accessible — internal documentation, regulatory or compliance text, large technical references, domain-specific knowledge bases — corpus build engagements are available as consulting work.
 
