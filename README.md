@@ -21,20 +21,16 @@ That's it. The LLM can now search and read the corpus.
 
 | Corpus | Description | Size |
 |--------|-------------|------|
-| [python-stdlib](corpus/python-stdlib.zip) | Python Standard Library — 10 modules, 598 sections, 5346 questions | 11 MB |
+| [python-stdlib](corpus/python-stdlib.zip) | Python Standard Library — 10 modules, 598 sections, 5346 questions | 5.3 MB |
+| [eu-ai-act](corpus/eu-ai-act.zip) | EU AI Act (Regulation 2024/1689) — 404 sections, 13012 questions | 13 MB |
 
 ## Building Your Own Corpus
 
-A QIRA corpus is a directory containing pre-formatted sections (SQLite) and a question index (ChromaDB). Building one means:
+A QIRA corpus is a directory containing pre-formatted sections (SQLite) and a question index (FAISS). Each source format needs its own builder; the pipeline after parsing is shared.
 
-1. Parse your source documents into a section tree
-2. Generate questions for each section using an LLM
-3. Pre-format the storage entries
-4. Vectorize and store
+**Entry point for you and your Claude: [`ks/`](ks/).** Start with [`ks/README.md`](ks/README.md) — it has a "Building a new corpus" reading path that whitelists the right files in the right order and tells you which to skip. The two reference builders under [`examples/`](examples/) are the starting points to copy from (`python-stdlib` for RST, `eu-ai-act` for XML).
 
-Each source format needs its own builder. See [`examples/python-stdlib/`](examples/python-stdlib/) for a reference implementation that parses CPython RST documentation.
-
-The storage contract and architecture are documented in [`docs/`](docs/).
+The storage contract and design rationale also live under [`docs/`](docs/) for human reading.
 
 ## Need a Corpus Built?
 
