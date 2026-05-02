@@ -129,6 +129,8 @@ The same underlying technologies — embeddings, vector search, LLMs — are use
 
 **The result:** better retrieval, better context, better answers. Not because of better technology — because the same technology is applied correctly.
 
+The architectural moves above don't appear in isolation. Variants of LLM-driven query reformulation, structured/hierarchical retrieval, agent-driven retrieval loops, and richer index targets exist in the literature — HyDE, ReAct, RAPTOR, GraphRAG, Self-RAG, and others. **Appendix C** surveys those approaches and locates QIRA within the landscape. The contribution claimed here is the specific composition: questions-as-index-unit, structured-document preservation, and agent-driven traversal — not any single ingredient.
+
 ---
 
 ## 6. A Worked Example
@@ -410,4 +412,56 @@ Any `.prompt` that wants corpus-grounded answers needs exactly two things:
 ```
 
 Everything else — system instructions, user templates, output formatting, multi-turn structure — is yours to design. QIRA stays a one-line dependency.
+
+---
+
+## Appendix C. Prior Art and Adjacent Work
+
+QIRA composes architectural ideas that appear individually elsewhere in the retrieval literature. This appendix surveys those adjacent approaches, organized by where each intervenes in the underlying problem — *the LLM is missing information from its context* — and locates QIRA within the landscape.
+
+### Query-side — improve the LLM's question before retrieval
+
+| Approach | What it does | What it addresses | What it doesn't |
+|---|---|---|---|
+| **HyDE** (Hypothetical Document Embeddings) | LLM generates a fake answer document; embed *that*; search against real document embeddings | The question-vs-statement embedding mismatch — by faking a statement, both sides of the cosine match are statements | Still searches over chunked text; a wrong hallucinated frame steers retrieval into the wrong neighborhood |
+| **Multi-query / RAG-Fusion** | LLM generates N rephrased queries, runs all, fuses results | Brittleness of a single embedding match | Multiplies query cost; underlying chunked-content problem unchanged |
+| **Step-back prompting** | LLM asks a more abstract question first, then narrows | Vague-user-query failure mode | Doesn't change what gets indexed |
+
+### Index-side — make the retrieval target richer
+
+| Approach | What it does | What it addresses | What it doesn't |
+|---|---|---|---|
+| **Doc-summary indexes** | Store per-section LLM summaries alongside chunks; search the summaries | The decontextualized-fragment problem | Still chunks under the hood; quality bound by summarizer |
+| **Parent-document retrieval** | Embed small chunks but return their larger parent containers | Context-loss from chunk-only retrieval | Still uses raw chunks as the search unit |
+| **Hierarchical retrieval** | Multi-level structure (chapter → section → paragraph); retrieve at the right level | Granularity mismatch | Usually still embeds raw text, not LLM-generated content |
+| **RAPTOR** | Recursive cluster + LLM-summarize, building a tree of summaries from leaves up | Coarse-to-fine retrieval over abstractions; long-document QA | Summarized statements (not questions); cluster-then-summarize loses author-intended structure; no agent-driven navigation |
+| **GraphRAG / KG-augmented** | Extract entities and relations into a graph; traverse for context | Cross-document relationships flat RAG misses | Heavy index-build, brittle entity extraction; no help when the relevant edge is missing from the graph |
+
+### Agent-driven — let the LLM control retrieval iteratively
+
+| Approach | What it does | What it addresses | What it doesn't |
+|---|---|---|---|
+| **ReAct** | LLM interleaves reasoning with tool calls including search; retries based on what comes back | Single-shot retrieval failure | The retrieval target itself is unchanged — usually still chunks |
+| **Self-RAG / Corrective RAG** | LLM critiques each retrieved chunk, decides if it's useful, re-retrieves if not | Quality filtering of retrieved chunks | Inherits chunked-content brittleness; adds latency |
+| **FLARE** | LLM predicts what it would say next, uses that prediction as the query, retrieves to verify | Look-ahead retrieval — fetching what is about to be needed | Same chunked target |
+
+### Long-context as alternative
+
+| Approach | What it does | What it addresses | What it doesn't |
+|---|---|---|---|
+| **Stuff-it-all-in** (Gemini 1.5, Claude 1M-context, etc.) | Skip retrieval entirely; load full corpus into context | Eliminates the retrieval-segment selection problem | Cost scales linearly with corpus size per query; attention quality degrades with context length; corpus must fit in window |
+
+### Where QIRA sits
+
+QIRA composes three of these moves with one new attribute:
+
+1. **Index-side, with a new attribute.** Like hierarchical retrieval and RAPTOR, QIRA preserves multi-level document structure and stores LLM-generated content alongside the source. The new attribute: the indexed unit is the **questions** each section answers — not summaries, not hypothetical documents, not entities. This is the inversion §3 argues for: the LLM searches in question-space because that is what the LLM internally formulates when it needs information.
+
+2. **Query-side, observed not designed.** The LLM reformulates queries before re-running search (similar in spirit to multi-query). The behavior reported in §6 — vocabulary acquisition from indexed questions — is an emergent property of the question-as-index choice, not a query-side technique engineered for. It functions as an in-band feedback loop without an explicit reformulation step.
+
+3. **Agent-driven, over structure rather than chunks.** Like ReAct, the LLM drives multi-step retrieval. Distinct from chunk-based agents: the retrieval target is structured corpus pointers (section IDs, breadcrumbs, cross-references), so the agent navigates hierarchically and follows cross-references rather than re-querying for new fragments.
+
+What QIRA does **not** combine: cross-document graph relationships (GraphRAG territory) or query-time hypothetical document generation (HyDE territory). These are compatible additions, not competing alternatives.
+
+The contribution is the composition, not any single ingredient. A reader steeped in retrieval literature will recognize each part; the architectural claim is that *questions-as-index-unit + structured-document preservation + agent-driven traversal* is a coherent and engineerable system whose cost economics (§7) make it practical at index build time.
 
