@@ -228,7 +228,7 @@ The Python standard library test corpus — 10 modules, 598 sections — require
 - Cost **less than $0.29** total
 - Completed in **under 30 minutes**, single-threaded
 
-That is less than a third of a cent per section. Less than a twentieth of a cent per question.
+That is more than 20 sections per penny. More than 180 questions per penny.
 
 The cost is dominated by Step 5 of the QI pipeline — question generation — which is the only step that requires an LLM. All other steps (parsing, organizing, cross-reference rewriting, pre-formatting, vectorizing, storing) are deterministic and effectively free.
 
