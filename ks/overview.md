@@ -10,7 +10,7 @@ Delivery model (per memory): corpus zips as product, no pip package, marketplace
 |---|---|
 | `README.md` | Human entry point. Quick start, available corpora, build-a-corpus pitch. |
 | `LICENSE` | MIT. |
-| `QIRA_Article.md` / `.pdf` | The conceptual paper. Source of the "RAG is hope-based" framing. |
+| `QIRA_Article.md` / `.pdf` | The conceptual paper. Source of the "RAG is hope-based" framing. PDF is regenerated from the `.md` via `scripts/build-article-pdf.sh` — re-run it whenever the `.md` changes and commit both. |
 | `docs/` | Human design docs. `concept → architecture → design → qi-pipeline → qi-ra-interface → prompt-template` + `competition-study`. |
 | `ks/` | This directory. Claude-oriented shared understanding. |
 | `runtime/` | The QIRA runtime. Single file: `runtime/qira` (Python, KePrompt external function). |
