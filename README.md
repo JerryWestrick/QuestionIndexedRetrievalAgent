@@ -1,55 +1,66 @@
 # QIRA — Question Indexed Retrieval Agent
 
-**Structured knowledge retrieval for LLMs using question-to-question semantic search.**
+An architectural alternative to RAG for **structured** corpora. Instead of chunking documents and embedding the fragments, QIRA indexes documents by the *questions they answer* and lets the LLM drive retrieval as an agent — searching with precise questions, getting back structured pointers, and reading what it needs.
 
-QIRA is an alternative to RAG. Instead of chunking documents and hoping retrieval works, QIRA puts the LLM in control of retrieval as an agent. Documents are indexed by the *questions they answer*, not by arbitrary chunks. The LLM searches with a precise question, gets back structured pointers to relevant sections, and reads what it needs.
+## Read the paper first
 
-Read the paper: [QIRA_Article.md](QIRA_Article.md)
+**→ [QIRA_Article.md](QIRA_Article.md)** ([PDF](QIRA_Article.pdf))
 
-## Quick Start
+The paper is the primary artifact in this repository. It lays out the critique of RAG, the architectural inversion, a worked example, the cost economics, prior art, and limitations. Everything else here — runtime, corpora, builders, knowledge store — exists so the paper's claims can be independently verified.
 
-QIRA runs as a [keprompt](https://github.com/JerryWestrick/keprompt) external function. To use it:
+The §2 scope caveat is load-bearing: RAG remains the only option for genuinely unstructured input (web scrape, OCR'd PDFs, chat logs). QIRA's claim is narrower — *when* documents have structure, use it.
 
-1. Download a corpus zip from [`corpus/`](corpus/)
-2. Extract into your keprompt project's `prompts/functions/` directory
-3. Run `qira --initialize` to generate `qira.prompt`
-4. Add `.functions qira` and `.include functions/qira.prompt` to your prompts
+## Reference cases — test it yourself
 
-That's it. The LLM can now search and read the corpus.
+Two corpora ship with the repo as runnable evidence. Each is a self-contained zip — the runtime executable plus the pre-built index — that drops into a keprompt project's `prompts/functions/` directory.
 
-## Available Corpora
+| Corpus | Source | Sections | Questions | Size |
+|---|---|---|---|---|
+| [eu-ai-act](corpus/eu-ai-act.zip) | EU AI Act (Regulation 2024/1689), EUR-Lex Formex 4 XML | 404 | 13,012 | 13 MB |
+| [python-stdlib](corpus/python-stdlib.zip) | Python Standard Library, Sphinx RST | 598 | 5,346 | 5.3 MB |
 
-| Corpus | Description | Size |
-|--------|-------------|------|
-| [python-stdlib](corpus/python-stdlib.zip) | Python Standard Library — 10 modules, 598 sections, 5346 questions | 5.3 MB |
-| [eu-ai-act](corpus/eu-ai-act.zip) | EU AI Act (Regulation 2024/1689) — 404 sections, 13012 questions | 13 MB |
+Use `eu-ai-act` if you want to see QIRA add value the LLM doesn't already have — the regulation post-dates most public training cutoffs. Use `python-stdlib` to confirm retrieval quality against material you can sanity-check by eye; expect the LLM to know most of it already.
 
-## Building Your Own Corpus
+[**QUICKSTART.md**](QUICKSTART.md) walks through installation and a two-stage validation: a plumbing test that pipes JSON to the runtime directly (no LLM needed), and a full test that runs an LLM through the retrieval loop. There is also a one-shot installer for the EU AI Act corpus:
 
-A QIRA corpus is a directory containing pre-formatted sections (SQLite) and a question index (FAISS). Each source format needs its own builder; the pipeline after parsing is shared.
+```bash
+curl -L https://github.com/JerryWestrick/QuestionIndexedRetrievalAgent/raw/main/examples/eu-ai-act/try-eu-ai-act.sh | bash
+```
 
-**Entry point for you and your Claude: [`ks/`](ks/).** Start with [`ks/README.md`](ks/README.md) — it has a "Building a new corpus" reading path that whitelists the right files in the right order and tells you which to skip. The two reference builders under [`examples/`](examples/) are the starting points to copy from (`python-stdlib` for RST, `eu-ai-act` for XML).
+[**Appendix A** of the paper](QIRA_Article.md#appendix-a-reproduce-the-6-runs) is the reproducibility kit for the §6 worked example — same prompt, same corpus, your own LLM choice.
 
-The storage contract and design rationale also live under [`docs/`](docs/) for human reading.
+## Build your own corpus
 
-## Need a Corpus Built?
+A QIRA corpus is a directory with pre-formatted sections (SQLite) and a question index (FAISS), conforming to the QI/RA storage contract. Each source format needs its own builder; the post-parse pipeline is shared.
 
-Building a high-quality corpus requires expertise — parsing structure from messy real-world documents, engineering good questions, validating retrieval quality. If you have docs that should be AI-accessible and want it done right, [get in touch](mailto:jerry@westrick.com).
+Entry point: **[`ks/`](ks/)** — the knowledge store. It has an audience-split load order; corpus authors follow Path A, which whitelists the right files in the right order. The two reference builders under [`examples/`](examples/) are the starting points to copy from (`python-stdlib` for RST, `eu-ai-act` for XML).
 
-- **Open source corpus builds** — your domain becomes part of the QIRA marketplace
-- **Private corpus builds** — stays behind your firewall, full exclusivity
+Builders are bespoke per source format — standalone scripts, not a framework. The contract is the deliverable; how you produce it is your call.
+
+## Consulting
+
+For organizations with structured documents that need to be LLM-accessible — internal documentation, regulatory or compliance text, large technical references, domain-specific knowledge bases — corpus build engagements are available as consulting work. Open-source builds for public corpora; private builds stay behind your firewall. Contact: [jerry@westrick.com](mailto:jerry@westrick.com).
+
+## Status
+
+QIRA is at the **validated** stage, not the measured stage. The architectural inversion works on real corpora, demonstrably; the paper does not present a benchmark study. See [§8 Limitations](QIRA_Article.md#8-limitations) for what that means in practice (N=1 worked example, no head-to-head benchmark, two corpora both well-structured, LLM-generated index unvalidated, single-author, harness-coupled to keprompt).
+
+Issues, corrections, and prior-art pointers welcome.
 
 ## Documentation
 
-- [QIRA_Article.md](QIRA_Article.md) — The conceptual paper
-- [docs/concept.md](docs/concept.md) — What QIRA is, why it exists
-- [docs/architecture.md](docs/architecture.md) — System architecture
-- [docs/design.md](docs/design.md) — Design decisions, storage contract
-- [docs/qi-pipeline.md](docs/qi-pipeline.md) — Building corpora
-- [docs/qi-ra-interface.md](docs/qi-ra-interface.md) — Storage contract spec
-- [docs/prompt-template.md](docs/prompt-template.md) — How qira.prompt is generated
-- [docs/competition-study.md](docs/competition-study.md) — Prior art and competitive landscape
+- [QIRA_Article.md](QIRA_Article.md) — the paper
+- [QUICKSTART.md](QUICKSTART.md) — install and validation
+- [`ks/`](ks/) — knowledge store, entry point for corpus authors and contributors
+- [`docs/`](docs/) — human-readable design documents:
+  [concept](docs/concept.md) ·
+  [architecture](docs/architecture.md) ·
+  [design](docs/design.md) ·
+  [QI pipeline](docs/qi-pipeline.md) ·
+  [QI/RA interface](docs/qi-ra-interface.md) ·
+  [prompt template](docs/prompt-template.md) ·
+  [competition study](docs/competition-study.md)
 
 ## License
 
-MIT — see [LICENSE](LICENSE)
+MIT — see [LICENSE](LICENSE).
