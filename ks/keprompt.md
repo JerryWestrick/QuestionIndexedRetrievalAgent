@@ -26,7 +26,6 @@ keprompt init
     └── functions
         ├── functions.json                          # function registry
         ├── keprompt_builtins.py                    # keprompt's built-in functions
-        ├── keprompt_builtins.py                    # another built-in
         ├── render_url_to_markdown.py               # sample external function
         └── model_prices_and_context_window.json    # LiteLLM model DB, ~2600 models
 ```
@@ -74,7 +73,7 @@ These caused a full debug loop in session 2026-04-11. Do not forget them.
 
 Variables are passed via `--set key value` on the CLI and referenced as `<<key>>` in the prompt body. Delimiters are configurable via the `Prefix` / `Postfix` variables (see `vm_state.variables` in a trace), but the defaults are `<<` and `>>`.
 
-Real-world example — the eu-ai-act builder's call in `examples/eu-ai-act/build_corpus.py:869`:
+Real-world example — the eu-ai-act builder's call in `examples/eu-ai-act/build_corpus.py:882`:
 
 ```python
 argv = [
@@ -107,7 +106,7 @@ KePrompt discovers external functions by scanning `prompts/functions/` at startu
 echo '{"corpus":"python-stdlib","question":"..."}' | ./prompts/functions/qira qira_search
 ```
 
-**Error protocol:** non-zero exit + stderr text. KePrompt catches it and delivers the stderr content to the LLM as a `tool_result`, so error messages should read well to an LLM (e.g. `Error: unknown corpus 'foo'. Available: python-stdlib, eu-ai-act`). Reference implementation: `runtime/qira:386`.
+**Error protocol:** non-zero exit + stderr text. KePrompt catches it and delivers the stderr content to the LLM as a `tool_result`, so error messages should read well to an LLM (e.g. `Error: unknown corpus 'foo'. Available: python-stdlib, eu-ai-act`). Reference implementation: `runtime/qira:408` (catch-block in `main()`).
 
 **Venv sensitivity:** external functions with a generic `#!/usr/bin/env python3` shebang inherit whatever `python3` is on `PATH` when keprompt spawns them. If keprompt is run from a non-activated venv shell, the external function's Python imports will fail. Always run keprompt from an activated venv. This is how `runtime/qira` is wired.
 

@@ -119,7 +119,7 @@ Stored verbatim in SQLite. RA does **zero transformation**.
 
 ## `corpus.md`
 
-Markdown with four fixed `## ` headings. Parsed by `runtime/qira --initialize` (see `parse_corpus_md` at `runtime/qira:312`).
+Markdown with four fixed `## ` headings. Parsed by `runtime/qira --initialize` (see `parse_corpus_md` at `runtime/qira:301`).
 
 ```
 ## Name

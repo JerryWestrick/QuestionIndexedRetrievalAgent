@@ -26,12 +26,12 @@
 | Source format | CPython RST (Sphinx-flavored reStructuredText) |
 | Parser | `docutils` |
 | Xref rewriting | `:func:` / `:class:` / `:mod:` role lookups → IDs |
-| Builder | `examples/python-stdlib/build_corpus.py` (880 lines) |
+| Builder | `examples/python-stdlib/build_corpus.py` (909 lines) |
 | Question prompt | `examples/python-stdlib/generate_questions.prompt` |
 | Embedding model | Model2Vec `minishlab/potion-base-8M` (static, CPU-only) |
 | LLM for Q-gen | `cerebras/gpt-oss-120b` via KePrompt |
-| Production numbers | 10 modules, 598 sections, 5346 questions, <$0.29, <30 min single-threaded |
-| Output | Shipped as `corpus/python-stdlib.zip` (11 MB) |
+| Production numbers | 10 modules, 598 sections, 5,346 questions, <$0.29, <30 min single-threaded |
+| Output | Shipped as `corpus/python-stdlib.zip` (5.3 MB) |
 | README | `examples/python-stdlib/README.md` |
 
 Source acquisition:
@@ -47,12 +47,12 @@ cd cpython-docs && git sparse-checkout set Doc/library
 | Source format | EUR-Lex Formex 4 XML (CELEX 32024R1689) |
 | Parser | `xml.etree.ElementTree` |
 | Xref rewriting | Regex over plain-text `Article N(M)` / `Annex III` / `Chapter IV` / `Recital (N)` → `{orig} (see eu-ai-act:{id})`. Formex doesn't mark up intra-doc xrefs. |
-| Builder | `examples/eu-ai-act/build_corpus.py` (1340 lines) |
+| Builder | `examples/eu-ai-act/build_corpus.py` (1,341 lines) |
 | Question prompt | `examples/eu-ai-act/generate_questions.prompt` |
 | Embedding model | Model2Vec `minishlab/potion-base-8M` — same as python-stdlib (single backend across all corpora) |
 | LLM for Q-gen | `cerebras/gpt-oss-120b` via KePrompt |
-| Estimated cost | ~400 sections × ~$0.0007 ≈ $0.30 |
-| Status | Shipped — corpus zip at `corpus/eu-ai-act.zip` |
+| Production numbers | 404 sections, 13,012 questions |
+| Status | Shipped — corpus zip at `corpus/eu-ai-act.zip` (13 MB) |
 | README | `examples/eu-ai-act/README.md` |
 
 Source acquisition:
@@ -68,22 +68,22 @@ All line numbers refer to `examples/eu-ai-act/build_corpus.py`.
 
 | Function | Line | Purpose |
 |---|---|---|
-| `crash_log_open` / `crash_log` | 40-53 | fsync'd append-log that survives hard resets. Every major step writes one line. |
-| `render_inline` | 87 | Formex inline elements → markdown inline. |
-| Section parsing (main act, annexes) | varies | XML walk building the `Section` dataclass tree. |
-| `organize` (called from `main`) | 1210 area | Step 3 — assigns IDs and breadcrumbs. |
-| `_assign_ids` | 750 | Recursive ID assignment. |
-| `build_xref_maps` | 761 | Step 4a — build lookup tables. |
-| `_XREF_PATTERNS` | 798 | Step 4b — regex patterns for cross-ref detection. |
-| `rewrite_xrefs` / `_rewrite_text` | 810 / 823 | Step 4c — regex substitution with "already annotated" guard. |
-| `call_keprompt` | 853 | Step 5 — one subprocess call per section. 180s timeout. Falls back to stub on failure. |
-| `build_section_entries` | 912 | Step 6 — pre-format `search_entry` + `read_entry`. |
+| `crash_log_open` / `crash_log` | 53 / 59 | fsync'd append-log that survives hard resets. Every major step writes one line. |
+| `render_inline` | 100 | Formex inline elements → markdown inline. |
+| Section parsing (main act, annexes) | 325 / 640 | `parse_main_act` and `parse_annex` — XML walk building the `Section` dataclass tree. |
+| `organize` | 747 | Step 3 — assigns IDs and breadcrumbs. |
+| `_assign_ids` | 760 | Recursive ID assignment. |
+| `build_xref_maps` | 774 | Step 4a — build lookup tables. |
+| `_XREF_PATTERNS` | 811 | Step 4b — regex patterns for cross-ref detection. |
+| `rewrite_xrefs` / `_rewrite_text` | 823 / 836 | Step 4c — regex substitution with "already annotated" guard. |
+| `call_keprompt` | 866 | Step 5 — one subprocess call per section. 180s timeout. Falls back to stub on failure. |
+| `build_section_entries` | 925 | Step 6 — pre-format `search_entry` + `read_entry`. |
 | `setup_output` | 962 | Step 7/8 — create output dir, open SQLite (`CREATE TABLE sections` + `CREATE TABLE questions`), return `(conn, db_path, faiss_path)`. Wipes DB + `.faiss` if `fresh=True`. |
 | `_backfill_questions_from_search_entry` | 1003 | Legacy-corpus migration — if `questions` is empty but `sections` is populated, extracts questions from each `sections.search_entry` via regex `^- \*(.+)\*$` and populates `questions`. |
 | `rebuild_faiss_from_db` | 1032 | **Resume path** — loads Model2Vec, creates in-memory `IndexFlatL2`, re-encodes every `questions.question` in `idx` order, returns `(index, count)`. SQLite is the source of truth; FAISS is always rebuilt in memory and written to disk only at end of successful build. |
-| `write_corpus_md` | 1021 | Write `corpus.md` with Name/Description/Embedding/Example. |
-| `process_section` | 1052 | Worker: keprompt → format → persist under `write_lock`. |
-| `main` | 1140 | Arg parsing, orchestration. |
+| `write_corpus_md` | 1053 | Write `corpus.md` with Name/Description/Embedding/Example. |
+| `process_section` | 1084 | Worker: keprompt → format → persist under `write_lock`. |
+| `main` | 1165 | Arg parsing, orchestration. |
 
 ## Builder CLI (eu-ai-act)
 

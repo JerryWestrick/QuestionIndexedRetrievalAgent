@@ -2,19 +2,19 @@
 
 QIRA = Question Indexed Retrieval Agent. RAG replacement. LLM drives retrieval; documents indexed by questions-they-answer, not content.
 
-Delivery model (per memory): corpus zips as product, no pip package, marketplace + build consultancy.
+Delivery model (per memory): corpus zips as product, no pip package, build consultancy.
 
 ## Top-level
 
 | Path | Purpose |
 |---|---|
-| `README.md` | Human entry point. Quick start, available corpora, build-a-corpus pitch. |
+| `README.md` | Human entry point. Leads with the paper; reference corpora and build-your-own as supporting evidence. |
 | `LICENSE` | MIT. |
 | `QIRA_Article.md` / `.pdf` | The conceptual paper. Source of the "RAG is hope-based" framing. PDF is regenerated from the `.md` via `scripts/build-article-pdf.sh` — re-run it whenever the `.md` changes and commit both. |
 | `docs/` | Human design docs. `concept → architecture → design → qi-pipeline → qi-ra-interface → prompt-template` + `competition-study`. |
 | `ks/` | This directory. Claude-oriented shared understanding. |
 | `runtime/` | The QIRA runtime. Single file: `runtime/qira` (Python, KePrompt external function). |
-| `corpus/` | Distributable corpus zips. Currently: `python-stdlib.zip` (~11 MB), `eu-ai-act.zip` (~25 MB). Both built with Model2Vec (`potion-base-8M`) + FAISS. Both **uncommitted**. |
+| `corpus/` | Distributable corpus zips. Currently: `python-stdlib.zip` (5.3 MB), `eu-ai-act.zip` (13 MB). Both built with Model2Vec (`potion-base-8M`) + FAISS. Both committed and shipped via raw GitHub URLs. |
 | `examples/` | Reference QI builders, one per source format. |
 | `.venv/` | Project virtualenv. Has `model2vec`, `faiss-cpu`, `docutils`, etc. No `chromadb`, no `onnxruntime`. |
 | `.claude/settings.local.json` | Project-level Claude Code settings. |
@@ -33,7 +33,7 @@ Delivery model (per memory): corpus zips as product, no pip package, marketplace
 
 ## `runtime/qira`
 
-Single executable. 428 lines (pre-patch). See **ks/runtime.md** for details.
+Single executable. 417 lines. See **ks/runtime.md** for details.
 
 Entry points:
 - `--list-functions` — OpenAI function defs for KePrompt discovery
@@ -47,8 +47,8 @@ Each example is a **self-contained reference QI builder** for one source format.
 
 | Dir | Source format | Status |
 |---|---|---|
-| `examples/python-stdlib/` | CPython RST docs via `docutils` | Built. Corpus zip shipped in `corpus/python-stdlib.zip`. `build_corpus.py` is 880 lines. |
-| `examples/eu-ai-act/` | EUR-Lex Formex 4 XML | **Shipped.** 404 sections. Builder is 1340 lines. Corpus zip at `corpus/eu-ai-act.zip`. |
+| `examples/python-stdlib/` | CPython RST docs via `docutils` | Shipped. 598 sections. Corpus zip at `corpus/python-stdlib.zip`. `build_corpus.py` is 909 lines. |
+| `examples/eu-ai-act/` | EUR-Lex Formex 4 XML | Shipped. 404 sections, 13,012 questions. Corpus zip at `corpus/eu-ai-act.zip`. Builder is 1,341 lines. |
 
 Each example dir has:
 - `build_corpus.py` — the builder
